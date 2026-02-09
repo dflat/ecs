@@ -300,9 +300,9 @@ void test_try_get_dead() {
 
 // Test that the iteration guard catches structural changes.
 // We override ECS_ASSERT behavior using signal handling to catch the abort.
-static jmp_buf jump_buf;
+static sigjmp_buf jump_buf;
 static void abort_handler(int) {
-    longjmp(jump_buf, 1);
+    siglongjmp(jump_buf, 1);
 }
 
 void test_iteration_guard() {
@@ -313,7 +313,7 @@ void test_iteration_guard() {
     auto old_handler = signal(SIGABRT, abort_handler);
     bool caught = false;
 
-    if (setjmp(jump_buf) == 0) {
+    if (sigsetjmp(jump_buf, 1) == 0) {
         w.each<Position>([&](Entity, Position&) {
             w.create(); // structural change during iteration — should assert
         });
@@ -324,6 +324,135 @@ void test_iteration_guard() {
     signal(SIGABRT, old_handler);
     assert(caught);
     std::printf("  iteration guard: OK\n");
+}
+
+// -- Phase 1.1: Exclude filters --
+
+void test_exclude_filter() {
+    World w;
+    Entity e1 = w.create_with(A{}, B{});
+    w.create_with(A{}, C{});
+    w.create_with(A{}, B{}, C{});
+
+    // each<A>(Exclude<C>) should match e1 (has A, no C) but not e2 or e3
+    std::vector<Entity> matched;
+    w.each<A>(World::Exclude<C>{}, [&](Entity e, A&) { matched.push_back(e); });
+    assert(matched.size() == 1);
+    assert(matched[0] == e1);
+
+    // each<A>(Exclude<B, C>) should match nothing (all entities with A also have B or C)
+    matched.clear();
+    w.each<A>(World::Exclude<B, C>{}, [&](Entity e, A&) { matched.push_back(e); });
+    assert(matched.empty());
+
+    // each<A, B>(Exclude<C>) should match e1 only
+    matched.clear();
+    w.each<A, B>(World::Exclude<C>{}, [&](Entity e, A&, B&) { matched.push_back(e); });
+    assert(matched.size() == 1);
+    assert(matched[0] == e1);
+
+    std::printf("  exclude filter: OK\n");
+}
+
+void test_exclude_no_entity() {
+    World w;
+    w.create_with(Position{1, 0}, Health{10});
+    w.create_with(Position{2, 0});
+    w.create_with(Position{3, 0}, Velocity{0, 0});
+
+    // Should only match the entity with Position but no Health and no Velocity
+    float sum = 0;
+    w.each_no_entity<Position>(World::Exclude<Health, Velocity>{},
+                               [&](Position& p) { sum += p.x; });
+    assert(sum == 2.0f);
+    std::printf("  exclude no_entity: OK\n");
+}
+
+// -- Phase 1.2: Utility queries --
+
+void test_count() {
+    World w;
+    assert(w.count() == 0);
+
+    w.create_with(Position{1, 0});
+    w.create_with(Position{2, 0}, Velocity{1, 0});
+    w.create_with(Health{50});
+    assert(w.count() == 3);
+    assert(w.count<Position>() == 2);
+    assert((w.count<Position, Velocity>() == 1));
+    assert(w.count<Health>() == 1);
+    assert(w.count<Tag>() == 0);
+    std::printf("  count: OK\n");
+}
+
+void test_single() {
+    World w;
+    w.create_with(Position{42, 99});
+    w.create_with(Health{100});
+
+    // Exactly one entity with Position
+    bool called = false;
+    w.single<Position>([&](Entity, Position& p) {
+        assert(p.x == 42.0f && p.y == 99.0f);
+        called = true;
+    });
+    assert(called);
+    std::printf("  single: OK\n");
+}
+
+void test_single_assert_zero() {
+    World w;
+    // No entities with Position — single should assert
+    auto old_handler = signal(SIGABRT, abort_handler);
+    bool caught = false;
+    if (sigsetjmp(jump_buf, 1) == 0) {
+        w.single<Position>([](Entity, Position&) {});
+    } else {
+        caught = true;
+    }
+    signal(SIGABRT, old_handler);
+    assert(caught);
+    std::printf("  single assert zero: OK\n");
+}
+
+void test_single_assert_multi() {
+    World w;
+    w.create_with(Position{1, 0});
+    w.create_with(Position{2, 0});
+    // Two entities with Position — single should assert
+    auto old_handler = signal(SIGABRT, abort_handler);
+    bool caught = false;
+    if (sigsetjmp(jump_buf, 1) == 0) {
+        w.single<Position>([](Entity, Position&) {});
+    } else {
+        caught = true;
+    }
+    signal(SIGABRT, old_handler);
+    assert(caught);
+    std::printf("  single assert multi: OK\n");
+}
+
+// -- Phase 1.3: Query caching --
+
+void test_query_cache_invalidation() {
+    World w;
+    w.create_with(Position{1, 0});
+    w.create_with(Position{2, 0});
+
+    // First query — cache miss, should find 2
+    int count = 0;
+    w.each<Position>([&](Entity, Position&) { ++count; });
+    assert(count == 2);
+
+    // Create entity in a NEW archetype that also has Position
+    w.create_with(Position{3, 0}, Velocity{0, 0});
+
+    // Second query — cache should be invalidated, should find 3
+    count = 0;
+    w.each<Position>([&](Entity, Position&) { ++count; });
+    assert(count == 3);
+
+    std::printf("  query cache invalidation: OK\n");
 }
 
 int main() {
@@ -346,6 +475,16 @@ int main() {
     test_add_overwrite();
     test_try_get_dead();
     test_iteration_guard();
+    std::printf("  -- Phase 1.1 --\n");
+    test_exclude_filter();
+    test_exclude_no_entity();
+    std::printf("  -- Phase 1.2 --\n");
+    test_count();
+    test_single();
+    test_single_assert_zero();
+    test_single_assert_multi();
+    std::printf("  -- Phase 1.3 --\n");
+    test_query_cache_invalidation();
     std::printf("All tests passed!\n");
     return 0;
 }

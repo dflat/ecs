@@ -103,6 +103,48 @@ public:
                records_[e.index].archetype != nullptr;
     }
 
+    // -- Utility queries --
+
+    // Total live entity count.
+    size_t count() const {
+        size_t total = 0;
+        for (auto& [ts, arch] : archetypes_)
+            total += arch->count();
+        return total;
+    }
+
+    // Count of entities matching all of Ts...
+    template <typename... Ts>
+    size_t count() const {
+        ComponentTypeID ids[] = {component_id<Ts>()...};
+        size_t total = 0;
+        for (auto& [ts, arch] : archetypes_) {
+            bool matches = true;
+            for (auto id : ids) {
+                if (!arch->has_component(id)) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches)
+                total += arch->count();
+        }
+        return total;
+    }
+
+    // Returns (Entity, Ts&...) for a query expected to match exactly one entity.
+    // Asserts on 0 or 2+ matches.
+    template <typename... Ts, typename Func>
+    void single(Func&& fn) {
+        size_t found = 0;
+        each<Ts...>([&](Entity e, Ts&... comps) {
+            ++found;
+            ECS_ASSERT(found <= 1, "single<Ts...>() matched more than one entity");
+            fn(e, comps...);
+        });
+        ECS_ASSERT(found == 1, "single<Ts...>() matched zero entities");
+    }
+
     // -- Component access --
 
     template <typename T>
@@ -181,6 +223,10 @@ public:
 
     // -- Query iteration --
 
+    // Exclude filter tag: each<A, B>(Exclude<C, D>{}, fn) matches entities with A,B but not C,D.
+    template <typename... Ts>
+    struct Exclude {};
+
     template <typename... Ts, typename Func>
     void each(Func&& fn) {
         iterating_ = true;
@@ -190,32 +236,17 @@ public:
         } guard{iterating_};
 
         ComponentTypeID ids[] = {component_id<Ts>()...};
-        for (auto& [ts, arch] : archetypes_) {
-            bool matches = true;
-            for (auto id : ids) {
-                if (!arch->has_component(id)) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (!matches)
-                continue;
-
+        for (auto* arch : cached_query(ids, sizeof...(Ts), nullptr, 0)) {
             size_t n = arch->count();
             if (n == 0)
                 continue;
-
-            // Get typed pointers into each column
             auto ptrs = std::make_tuple(
                 static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
-
-            for (size_t i = 0; i < n; ++i) {
+            for (size_t i = 0; i < n; ++i)
                 fn(arch->entities[i], std::get<Ts*>(ptrs)[i]...);
-            }
         }
     }
 
-    // Overload without entity parameter
     template <typename... Ts, typename Func>
     void each_no_entity(Func&& fn) {
         iterating_ = true;
@@ -225,27 +256,58 @@ public:
         } guard{iterating_};
 
         ComponentTypeID ids[] = {component_id<Ts>()...};
-        for (auto& [ts, arch] : archetypes_) {
-            bool matches = true;
-            for (auto id : ids) {
-                if (!arch->has_component(id)) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (!matches)
-                continue;
-
+        for (auto* arch : cached_query(ids, sizeof...(Ts), nullptr, 0)) {
             size_t n = arch->count();
             if (n == 0)
                 continue;
-
             auto ptrs = std::make_tuple(
                 static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
-
-            for (size_t i = 0; i < n; ++i) {
+            for (size_t i = 0; i < n; ++i)
                 fn(std::get<Ts*>(ptrs)[i]...);
-            }
+        }
+    }
+
+    // -- Exclude-filter overloads --
+
+    template <typename... Ts, typename... Ex, typename Func>
+    void each(Exclude<Ex...>, Func&& fn) {
+        iterating_ = true;
+        struct Guard {
+            bool& flag;
+            ~Guard() { flag = false; }
+        } guard{iterating_};
+
+        ComponentTypeID include_ids[] = {component_id<Ts>()...};
+        ComponentTypeID exclude_ids[] = {component_id<Ex>()...};
+        for (auto* arch : cached_query(include_ids, sizeof...(Ts), exclude_ids, sizeof...(Ex))) {
+            size_t n = arch->count();
+            if (n == 0)
+                continue;
+            auto ptrs = std::make_tuple(
+                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
+            for (size_t i = 0; i < n; ++i)
+                fn(arch->entities[i], std::get<Ts*>(ptrs)[i]...);
+        }
+    }
+
+    template <typename... Ts, typename... Ex, typename Func>
+    void each_no_entity(Exclude<Ex...>, Func&& fn) {
+        iterating_ = true;
+        struct Guard {
+            bool& flag;
+            ~Guard() { flag = false; }
+        } guard{iterating_};
+
+        ComponentTypeID include_ids[] = {component_id<Ts>()...};
+        ComponentTypeID exclude_ids[] = {component_id<Ex>()...};
+        for (auto* arch : cached_query(include_ids, sizeof...(Ts), exclude_ids, sizeof...(Ex))) {
+            size_t n = arch->count();
+            if (n == 0)
+                continue;
+            auto ptrs = std::make_tuple(
+                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
+            for (size_t i = 0; i < n; ++i)
+                fn(std::get<Ts*>(ptrs)[i]...);
         }
     }
 
@@ -255,6 +317,55 @@ private:
     std::vector<uint32_t> free_list_;
     std::unordered_map<TypeSet, std::unique_ptr<Archetype>, TypeSetHash> archetypes_;
     bool iterating_ = false;
+
+    // -- Query cache --
+    struct QueryKey {
+        TypeSet include_ids;
+        TypeSet exclude_ids;
+        bool operator==(const QueryKey& other) const {
+            return include_ids == other.include_ids && exclude_ids == other.exclude_ids;
+        }
+    };
+    struct QueryKeyHash {
+        size_t operator()(const QueryKey& k) const {
+            TypeSetHash h;
+            return h(k.include_ids) ^ (h(k.exclude_ids) * 31);
+        }
+    };
+    struct QueryCacheEntry {
+        std::vector<Archetype*> archetypes;
+        uint64_t generation = 0;
+    };
+    uint64_t archetype_generation_ = 0;
+    mutable std::unordered_map<QueryKey, QueryCacheEntry, QueryKeyHash> query_cache_;
+
+    const std::vector<Archetype*>& cached_query(const ComponentTypeID* include, size_t n_include,
+                                                const ComponentTypeID* exclude, size_t n_exclude) {
+        QueryKey key{TypeSet(include, include + n_include), TypeSet(exclude, exclude + n_exclude)};
+        auto& entry = query_cache_[key];
+        if (entry.generation != archetype_generation_) {
+            entry.archetypes.clear();
+            for (auto& [ts, arch] : archetypes_) {
+                if (archetype_matches(arch.get(), include, n_include, exclude, n_exclude))
+                    entry.archetypes.push_back(arch.get());
+            }
+            entry.generation = archetype_generation_;
+        }
+        return entry.archetypes;
+    }
+
+    static bool archetype_matches(Archetype* arch, const ComponentTypeID* include, size_t n_include,
+                                  const ComponentTypeID* exclude, size_t n_exclude) {
+        for (size_t i = 0; i < n_include; ++i) {
+            if (!arch->has_component(include[i]))
+                return false;
+        }
+        for (size_t i = 0; i < n_exclude; ++i) {
+            if (arch->has_component(exclude[i]))
+                return false;
+        }
+        return true;
+    }
 
     Archetype* get_or_create_archetype(const TypeSet& ts) {
         auto it = archetypes_.find(ts);
@@ -269,6 +380,7 @@ private:
         }
         Archetype* ptr = arch.get();
         archetypes_.emplace(ts, std::move(arch));
+        ++archetype_generation_;
         return ptr;
     }
 

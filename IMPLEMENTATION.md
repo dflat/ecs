@@ -21,9 +21,9 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 0.3 Sanitizer build configuration
 
 ### Phase 1 — Query Improvements
-- [ ] 1.1 Exclude filters
-- [ ] 1.2 Utility queries (`count`, `single`)
-- [ ] 1.3 Query caching
+- [x] 1.1 Exclude filters
+- [x] 1.2 Utility queries (`count`, `single`)
+- [x] 1.3 Query caching
 
 ### Phase 2 — Deferred Commands
 - [ ] 2.1 CommandBuffer

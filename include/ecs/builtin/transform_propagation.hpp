@@ -12,16 +12,14 @@ namespace ecs {
 inline void propagate_transforms(World& world) {
     std::queue<Entity> queue;
 
-    // Find roots and seed the BFS
+    // Find roots (entities with transforms but no Parent) and seed the BFS
     world.each<LocalTransform, WorldTransform>(
-        [&](Entity e, LocalTransform& local, WorldTransform& wt) {
-            if (!world.has<Parent>(e)) {
-                wt.matrix = local.matrix;
-                auto* children = world.try_get<Children>(e);
-                if (children) {
-                    for (auto child : children->entities)
-                        queue.push(child);
-                }
+        World::Exclude<Parent>{}, [&](Entity e, LocalTransform& local, WorldTransform& wt) {
+            wt.matrix = local.matrix;
+            auto* children = world.try_get<Children>(e);
+            if (children) {
+                for (auto child : children->entities)
+                    queue.push(child);
             }
         });
 
