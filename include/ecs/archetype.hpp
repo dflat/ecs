@@ -41,14 +41,10 @@ struct Archetype {
 
     size_t count() const { return entities.size(); }
 
-    bool has_component(ComponentTypeID id) const {
-        return columns.find(id) != columns.end();
-    }
+    bool has_component(ComponentTypeID id) const { return columns.find(id) != columns.end(); }
 
     // Append an entity with no component data yet (columns must be pushed separately)
-    void push_entity(Entity e) {
-        entities.push_back(e);
-    }
+    void push_entity(Entity e) { entities.push_back(e); }
 
     // Swap-remove entity at row, returns the entity that was swapped into that row
     // (or INVALID_ENTITY if it was the last row)

@@ -81,7 +81,8 @@ public:
     // -- Entity destruction --
 
     void destroy(Entity e) {
-        if (!alive(e)) return;
+        if (!alive(e))
+            return;
         auto& rec = records_[e.index];
         Entity swapped = rec.archetype->swap_remove(rec.row);
         if (swapped != INVALID_ENTITY) {
@@ -94,8 +95,7 @@ public:
     }
 
     bool alive(Entity e) const {
-        return e.index < generations_.size() &&
-               e.generation == generations_[e.index] &&
+        return e.index < generations_.size() && e.generation == generations_[e.index] &&
                records_[e.index].archetype != nullptr;
     }
 
@@ -103,7 +103,8 @@ public:
 
     template <typename T>
     bool has(Entity e) const {
-        if (!alive(e)) return false;
+        if (!alive(e))
+            return false;
         return records_[e.index].archetype->has_component(component_id<T>());
     }
 
@@ -116,7 +117,8 @@ public:
 
     template <typename T>
     T* try_get(Entity e) {
-        if (!has<T>(e)) return nullptr;
+        if (!has<T>(e))
+            return nullptr;
         return &get<T>(e);
     }
 
@@ -124,7 +126,8 @@ public:
 
     template <typename T>
     void add(Entity e, T&& component) {
-        if (!alive(e)) return;
+        if (!alive(e))
+            return;
         ensure_column_factory<std::decay_t<T>>();
         ComponentTypeID cid = component_id<std::decay_t<T>>();
 
@@ -151,12 +154,14 @@ public:
 
     template <typename T>
     void remove(Entity e) {
-        if (!alive(e)) return;
+        if (!alive(e))
+            return;
         ComponentTypeID cid = component_id<T>();
 
         auto& rec = records_[e.index];
         Archetype* old_arch = rec.archetype;
-        if (!old_arch->has_component(cid)) return;
+        if (!old_arch->has_component(cid))
+            return;
 
         Archetype* new_arch = find_remove_target(old_arch, cid);
         size_t old_row = rec.row;
@@ -174,17 +179,21 @@ public:
         for (auto& [ts, arch] : archetypes_) {
             bool matches = true;
             for (auto id : ids) {
-                if (!arch->has_component(id)) { matches = false; break; }
+                if (!arch->has_component(id)) {
+                    matches = false;
+                    break;
+                }
             }
-            if (!matches) continue;
+            if (!matches)
+                continue;
 
             size_t n = arch->count();
-            if (n == 0) continue;
+            if (n == 0)
+                continue;
 
             // Get typed pointers into each column
             auto ptrs = std::make_tuple(
-                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...
-            );
+                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
 
             for (size_t i = 0; i < n; ++i) {
                 fn(arch->entities[i], std::get<Ts*>(ptrs)[i]...);
@@ -199,16 +208,20 @@ public:
         for (auto& [ts, arch] : archetypes_) {
             bool matches = true;
             for (auto id : ids) {
-                if (!arch->has_component(id)) { matches = false; break; }
+                if (!arch->has_component(id)) {
+                    matches = false;
+                    break;
+                }
             }
-            if (!matches) continue;
+            if (!matches)
+                continue;
 
             size_t n = arch->count();
-            if (n == 0) continue;
+            if (n == 0)
+                continue;
 
             auto ptrs = std::make_tuple(
-                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...
-            );
+                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
 
             for (size_t i = 0; i < n; ++i) {
                 fn(std::get<Ts*>(ptrs)[i]...);
@@ -224,7 +237,8 @@ private:
 
     Archetype* get_or_create_archetype(const TypeSet& ts) {
         auto it = archetypes_.find(ts);
-        if (it != archetypes_.end()) return it->second.get();
+        if (it != archetypes_.end())
+            return it->second.get();
 
         auto arch = std::make_unique<Archetype>();
         arch->type_set = ts;
@@ -257,7 +271,8 @@ private:
 
         TypeSet new_ts;
         for (auto id : src->type_set) {
-            if (id != cid) new_ts.push_back(id);
+            if (id != cid)
+                new_ts.push_back(id);
         }
         Archetype* target = get_or_create_archetype(new_ts);
         src->edges[cid].remove_target = target;
@@ -296,8 +311,8 @@ private:
     }
 
     // Migrate removing a component: moves all columns except cid_to_remove.
-    void migrate_entity_removing(Entity e, Archetype* old_arch, Archetype* new_arch,
-                                  size_t old_row, ComponentTypeID /*cid_to_remove*/) {
+    void migrate_entity_removing(Entity e, Archetype* old_arch, Archetype* new_arch, size_t old_row,
+                                 ComponentTypeID /*cid_to_remove*/) {
         // Move shared column data (all except the removed one)
         for (auto& [cid, new_col] : new_arch->columns) {
             auto it = old_arch->columns.find(cid);

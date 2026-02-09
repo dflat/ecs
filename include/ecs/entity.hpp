@@ -8,7 +8,9 @@ struct Entity {
     uint32_t index = 0;
     uint32_t generation = 0;
 
-    bool operator==(const Entity& o) const { return index == o.index && generation == o.generation; }
+    bool operator==(const Entity& o) const {
+        return index == o.index && generation == o.generation;
+    }
     bool operator!=(const Entity& o) const { return !(*this == o); }
 };
 

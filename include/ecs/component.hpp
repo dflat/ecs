@@ -29,8 +29,8 @@ struct ComponentColumn {
     size_t count = 0;
     size_t capacity = 0;
 
-    using MoveFunc = void(*)(void* dst, void* src);
-    using DestroyFunc = void(*)(void* ptr);
+    using MoveFunc = void (*)(void* dst, void* src);
+    using DestroyFunc = void (*)(void* ptr);
 
     MoveFunc move_fn = nullptr;
     DestroyFunc destroy_fn = nullptr;
@@ -38,8 +38,12 @@ struct ComponentColumn {
     ComponentColumn() = default;
 
     ComponentColumn(ComponentColumn&& o) noexcept
-        : data(o.data), elem_size(o.elem_size), count(o.count), capacity(o.capacity),
-          move_fn(o.move_fn), destroy_fn(o.destroy_fn) {
+        : data(o.data),
+          elem_size(o.elem_size),
+          count(o.count),
+          capacity(o.capacity),
+          move_fn(o.move_fn),
+          destroy_fn(o.destroy_fn) {
         o.data = nullptr;
         o.count = 0;
         o.capacity = 0;
@@ -49,9 +53,15 @@ struct ComponentColumn {
         if (this != &o) {
             destroy_all();
             std::free(data);
-            data = o.data; elem_size = o.elem_size; count = o.count;
-            capacity = o.capacity; move_fn = o.move_fn; destroy_fn = o.destroy_fn;
-            o.data = nullptr; o.count = 0; o.capacity = 0;
+            data = o.data;
+            elem_size = o.elem_size;
+            count = o.count;
+            capacity = o.capacity;
+            move_fn = o.move_fn;
+            destroy_fn = o.destroy_fn;
+            o.data = nullptr;
+            o.count = 0;
+            o.capacity = 0;
         }
         return *this;
     }
@@ -77,7 +87,8 @@ struct ComponentColumn {
     }
 
     void push_raw(void* src) {
-        if (count == capacity) grow();
+        if (count == capacity)
+            grow();
         move_fn(data + count * elem_size, src);
         ++count;
     }
@@ -131,7 +142,9 @@ void ensure_column_factory() {
     auto& reg = column_factory_registry();
     ComponentTypeID id = component_id<T>();
     if (reg.find(id) == reg.end()) {
-        reg[id] = []() -> ComponentColumn { return make_column<T>(); };
+        reg[id] = []() -> ComponentColumn {
+            return make_column<T>();
+        };
     }
 }
 

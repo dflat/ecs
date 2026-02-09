@@ -1,12 +1,18 @@
-#include <ecs/ecs.hpp>
 #include <cassert>
 #include <cstdio>
+#include <ecs/ecs.hpp>
 
 using namespace ecs;
 
-struct Position { float x, y; };
-struct Velocity { float dx, dy; };
-struct Health { int hp; };
+struct Position {
+    float x, y;
+};
+struct Velocity {
+    float dx, dy;
+};
+struct Health {
+    int hp;
+};
 
 void test_create_destroy() {
     World w;
@@ -85,9 +91,9 @@ void test_generation_reuse() {
     w.destroy(e1);
 
     Entity e2 = w.create();
-    assert(e2.index == idx);             // reused index
+    assert(e2.index == idx);                    // reused index
     assert(e2.generation == e1.generation + 1); // bumped generation
-    assert(!w.alive(e1));                // old handle is dead
+    assert(!w.alive(e1));                       // old handle is dead
     assert(w.alive(e2));
     std::printf("  generation reuse: OK\n");
 }
@@ -96,26 +102,16 @@ void test_hierarchy_propagation() {
     World w;
 
     // Root at (10, 0, 0)
-    Entity root = w.create_with(
-        LocalTransform{Mat4::translation(10, 0, 0)},
-        WorldTransform{},
-        Children{{}}
-    );
+    Entity root =
+        w.create_with(LocalTransform{Mat4::translation(10, 0, 0)}, WorldTransform{}, Children{{}});
 
     // Child at (0, 5, 0) relative to root
-    Entity child = w.create_with(
-        LocalTransform{Mat4::translation(0, 5, 0)},
-        WorldTransform{},
-        Parent{root},
-        Children{{}}
-    );
+    Entity child = w.create_with(LocalTransform{Mat4::translation(0, 5, 0)}, WorldTransform{},
+                                 Parent{root}, Children{{}});
 
     // Grandchild at (0, 0, 3) relative to child
-    Entity grandchild = w.create_with(
-        LocalTransform{Mat4::translation(0, 0, 3)},
-        WorldTransform{},
-        Parent{child}
-    );
+    Entity grandchild =
+        w.create_with(LocalTransform{Mat4::translation(0, 0, 3)}, WorldTransform{}, Parent{child});
 
     // Wire up children
     w.get<Children>(root).entities.push_back(child);

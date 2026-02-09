@@ -29,7 +29,9 @@ struct Mat4 {
 
     static Mat4 translation(float x, float y, float z) {
         Mat4 r;
-        r.m[12] = x; r.m[13] = y; r.m[14] = z;
+        r.m[12] = x;
+        r.m[13] = y;
+        r.m[14] = z;
         return r;
     }
 
