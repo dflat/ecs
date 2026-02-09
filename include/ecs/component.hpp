@@ -1,4 +1,6 @@
 #pragma once
+
+#include <cassert>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -6,6 +8,10 @@
 #include <map>
 #include <new>
 #include <utility>
+
+#ifndef ECS_ASSERT
+#define ECS_ASSERT(expr, msg) assert((expr) && (msg))
+#endif
 
 namespace ecs {
 

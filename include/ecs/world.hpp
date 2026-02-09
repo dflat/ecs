@@ -29,6 +29,7 @@ public:
     // -- Entity creation --
 
     Entity create() {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
         uint32_t idx;
         if (!free_list_.empty()) {
             idx = free_list_.back();
@@ -51,6 +52,7 @@ public:
 
     template <typename... Ts>
     Entity create_with(Ts&&... components) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
         // Ensure column factories are registered for all types
         (ensure_column_factory<std::decay_t<Ts>>(), ...);
 
@@ -73,6 +75,7 @@ public:
         arch->push_entity(e);
         // Push each component into its column
         (push_component_to_archetype<std::decay_t<Ts>>(arch, std::forward<Ts>(components)), ...);
+        arch->assert_parity();
 
         records_[idx] = {arch, row};
         return e;
@@ -81,6 +84,7 @@ public:
     // -- Entity destruction --
 
     void destroy(Entity e) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
         if (!alive(e))
             return;
         auto& rec = records_[e.index];
@@ -110,6 +114,8 @@ public:
 
     template <typename T>
     T& get(Entity e) {
+        ECS_ASSERT(alive(e), "get<T> on dead entity");
+        ECS_ASSERT(has<T>(e), "get<T> on entity missing component");
         auto& rec = records_[e.index];
         auto& col = rec.archetype->columns.at(component_id<T>());
         return *static_cast<T*>(col.get(rec.row));
@@ -126,6 +132,7 @@ public:
 
     template <typename T>
     void add(Entity e, T&& component) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
         if (!alive(e))
             return;
         ensure_column_factory<std::decay_t<T>>();
@@ -154,6 +161,7 @@ public:
 
     template <typename T>
     void remove(Entity e) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
         if (!alive(e))
             return;
         ComponentTypeID cid = component_id<T>();
@@ -175,6 +183,12 @@ public:
 
     template <typename... Ts, typename Func>
     void each(Func&& fn) {
+        iterating_ = true;
+        struct Guard {
+            bool& flag;
+            ~Guard() { flag = false; }
+        } guard{iterating_};
+
         ComponentTypeID ids[] = {component_id<Ts>()...};
         for (auto& [ts, arch] : archetypes_) {
             bool matches = true;
@@ -204,6 +218,12 @@ public:
     // Overload without entity parameter
     template <typename... Ts, typename Func>
     void each_no_entity(Func&& fn) {
+        iterating_ = true;
+        struct Guard {
+            bool& flag;
+            ~Guard() { flag = false; }
+        } guard{iterating_};
+
         ComponentTypeID ids[] = {component_id<Ts>()...};
         for (auto& [ts, arch] : archetypes_) {
             bool matches = true;
@@ -234,6 +254,7 @@ private:
     std::vector<EntityRecord> records_;
     std::vector<uint32_t> free_list_;
     std::unordered_map<TypeSet, std::unique_ptr<Archetype>, TypeSetHash> archetypes_;
+    bool iterating_ = false;
 
     Archetype* get_or_create_archetype(const TypeSet& ts) {
         auto it = archetypes_.find(ts);

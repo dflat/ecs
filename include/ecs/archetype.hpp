@@ -43,6 +43,11 @@ struct Archetype {
 
     bool has_component(ComponentTypeID id) const { return columns.find(id) != columns.end(); }
 
+    void assert_parity() const {
+        for (auto& [id, col] : columns)
+            ECS_ASSERT(col.count == entities.size(), "entity-column parity violated");
+    }
+
     // Append an entity with no component data yet (columns must be pushed separately)
     void push_entity(Entity e) { entities.push_back(e); }
 
@@ -57,6 +62,7 @@ struct Archetype {
         entities.pop_back();
         for (auto& [id, col] : columns)
             col.swap_remove(row);
+        assert_parity();
         return swapped;
     }
 };

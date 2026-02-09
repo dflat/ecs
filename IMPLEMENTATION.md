@@ -16,9 +16,9 @@ earlier ones. Items across phases are independent unless noted.
 > before marking complete.
 
 ### Phase 0 — Hardening & Test Infrastructure
-- [ ] 0.1 Debug-mode invariant checks
-- [ ] 0.2 Expand test coverage
-- [ ] 0.3 Sanitizer build configuration
+- [x] 0.1 Debug-mode invariant checks
+- [x] 0.2 Expand test coverage
+- [x] 0.3 Sanitizer build configuration
 
 ### Phase 1 — Query Improvements
 - [ ] 1.1 Exclude filters
