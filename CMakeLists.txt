@@ -17,3 +17,8 @@ if(ECS_SANITIZE)
     target_compile_options(ecs_test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(ecs_test PRIVATE -fsanitize=address,undefined)
 endif()
+
+option(ECS_BUILD_EXAMPLES "Build example programs" OFF)
+if(ECS_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
