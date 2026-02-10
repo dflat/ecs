@@ -13,3 +13,4 @@ set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(raylib)
 
 add_subdirectory(visual_harness)
+add_subdirectory(stress_harness)
