@@ -30,7 +30,7 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 2.2 Integration with iteration
 
 ### Phase 3 — Singleton Resources
-- [ ] 3.1 Resource storage
+- [x] 3.1 Resource storage
 
 ### Phase 4 — Observers
 - [ ] 4.1 Component lifecycle hooks

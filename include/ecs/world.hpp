@@ -6,6 +6,7 @@
 #include <cassert>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace ecs {
@@ -23,7 +24,12 @@ public:
         records_.push_back({});
     }
 
-    ~World() = default;
+    ~World() {
+        // resources_ must be destroyed before other members since resource
+        // destructors might reference nothing else, but explicit clear keeps
+        // destruction order deterministic.
+        resources_.clear();
+    }
     World(const World&) = delete;
     World& operator=(const World&) = delete;
 
@@ -188,6 +194,53 @@ public:
         auto cmds = std::move(deferred_commands_);
         for (auto& cmd : cmds)
             cmd(*this);
+    }
+
+    // -- Resources --
+
+    template <typename T>
+    void set_resource(T&& value) {
+        using U = std::decay_t<T>;
+        auto id = component_id<U>();
+        auto it = resources_.find(id);
+        if (it != resources_.end()) {
+            if (it->second.data && it->second.deleter)
+                it->second.deleter(it->second.data);
+            it->second.data = new U(std::forward<T>(value));
+        } else {
+            ErasedResource r;
+            r.data = new U(std::forward<T>(value));
+            r.deleter = [](void* p) {
+                delete static_cast<U*>(p);
+            };
+            resources_.emplace(id, std::move(r));
+        }
+    }
+
+    template <typename T>
+    T& resource() {
+        auto it = resources_.find(component_id<T>());
+        ECS_ASSERT(it != resources_.end() && it->second.data, "resource<T>() not found");
+        return *static_cast<T*>(it->second.data);
+    }
+
+    template <typename T>
+    T* try_resource() {
+        auto it = resources_.find(component_id<T>());
+        if (it == resources_.end() || !it->second.data)
+            return nullptr;
+        return static_cast<T*>(it->second.data);
+    }
+
+    template <typename T>
+    bool has_resource() const {
+        auto it = resources_.find(component_id<T>());
+        return it != resources_.end() && it->second.data;
+    }
+
+    template <typename T>
+    void remove_resource() {
+        resources_.erase(component_id<T>());
     }
 
     // -- Component access --
@@ -357,10 +410,36 @@ public:
     }
 
 private:
+    struct ErasedResource {
+        void* data = nullptr;
+        void (*deleter)(void*) = nullptr;
+        ~ErasedResource() {
+            if (data && deleter)
+                deleter(data);
+        }
+        ErasedResource() = default;
+        ErasedResource(ErasedResource&& o) noexcept : data(o.data), deleter(o.deleter) {
+            o.data = nullptr;
+        }
+        ErasedResource& operator=(ErasedResource&& o) noexcept {
+            if (this != &o) {
+                if (data && deleter)
+                    deleter(data);
+                data = o.data;
+                deleter = o.deleter;
+                o.data = nullptr;
+            }
+            return *this;
+        }
+        ErasedResource(const ErasedResource&) = delete;
+        ErasedResource& operator=(const ErasedResource&) = delete;
+    };
+
     std::vector<uint32_t> generations_;
     std::vector<EntityRecord> records_;
     std::vector<uint32_t> free_list_;
     std::unordered_map<TypeSet, std::unique_ptr<Archetype>, TypeSetHash> archetypes_;
+    std::unordered_map<ComponentTypeID, ErasedResource> resources_;
     bool iterating_ = false;
     std::vector<std::function<void(World&)>> deferred_commands_;
 

@@ -24,7 +24,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 - Serialization. No built-in save/load.
 - Reactive/event systems. No observers or change detection.
 - Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. Optimization (e.g., bitset archetype matching, chunk allocation) is deferred.
-- Singleton resources. World-level unique data not yet supported.
+- ~~Singleton resources.~~ Implemented in Phase 3 — see §3.7.
 
 ---
 
@@ -221,6 +221,22 @@ A standalone command buffer with the same API. Useful when commands need to be a
 
 **Implementation:** Both `DeferredProxy` and `CommandBuffer` store commands as `std::function<void(World&)>` lambdas. Component data is kept alive via `std::shared_ptr`. This is simple and correct; performance optimization (custom type-erased storage) is deferred to Phase 7 if profiling warrants it.
 
+### 3.7 Singleton Resources
+
+Typed global data stored on the `World`, independent of entities. Useful for data like delta time, input state, or asset handles that don't belong to any entity.
+
+| Method | Signature | Description |
+|---|---|---|
+| `set_resource<T>` | `void set_resource(T&& value)` | Insert or overwrite a resource of type `T`. |
+| `resource<T>` | `T& resource()` | Get reference. **Precondition:** resource exists (asserts if absent). |
+| `try_resource<T>` | `T* try_resource()` | Get pointer, or `nullptr` if absent. |
+| `has_resource<T>` | `bool has_resource() const` | Check existence. |
+| `remove_resource<T>` | `void remove_resource()` | Erase. No-op if absent. |
+
+Resources use the same `component_id<T>()` namespace as components but occupy separate storage. A type can be used as both a component and a resource simultaneously without conflict.
+
+Resources are destroyed when the `World` is destroyed, or when overwritten/removed. Destruction order of multiple resources is unspecified.
+
 ---
 
 ## 4. System Registry
@@ -313,10 +329,9 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Utility queries~~ — §3.4. `count()`, `count<Ts...>()`, `single<Ts...>()`.
 - ~~Debug-mode invariant checks~~ — `ECS_ASSERT` guards on all structural operations.
 - ~~Sanitizer build~~ — `cmake -DECS_SANITIZE=ON`.
+- ~~Singleton resources~~ — §3.7. Typed global data on World, independent of entities.
 
 ### 8.1 Near-Term
-
-- **Singleton resources.** World-level unique data (e.g., `DeltaTime`, `InputState`) accessible without entity queries.
 - **Observers / hooks.** Register callbacks for component add/remove events on specific types. Enables reactive patterns without polling.
 
 ### 8.2 Mid-Term

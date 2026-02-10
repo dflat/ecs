@@ -576,6 +576,69 @@ void test_deferred_manual_flush() {
     std::printf("  deferred manual flush: OK\n");
 }
 
+// --- Phase 3: Resources ---
+
+struct DeltaTime {
+    float dt;
+};
+
+void test_resource_set_get() {
+    World w;
+    w.set_resource(DeltaTime{0.016f});
+    assert(w.has_resource<DeltaTime>());
+    assert(w.resource<DeltaTime>().dt == 0.016f);
+    std::printf("  resource set/get: OK\n");
+}
+
+void test_resource_overwrite() {
+    World w;
+    w.set_resource(DeltaTime{0.016f});
+    w.set_resource(DeltaTime{0.032f});
+    assert(w.resource<DeltaTime>().dt == 0.032f);
+    std::printf("  resource overwrite: OK\n");
+}
+
+void test_resource_try_nullptr() {
+    World w;
+    assert(w.try_resource<DeltaTime>() == nullptr);
+    w.set_resource(DeltaTime{0.016f});
+    assert(w.try_resource<DeltaTime>() != nullptr);
+    assert(w.try_resource<DeltaTime>()->dt == 0.016f);
+    std::printf("  resource try nullptr: OK\n");
+}
+
+void test_resource_has_remove() {
+    World w;
+    assert(!w.has_resource<DeltaTime>());
+    w.set_resource(DeltaTime{0.016f});
+    assert(w.has_resource<DeltaTime>());
+    w.remove_resource<DeltaTime>();
+    assert(!w.has_resource<DeltaTime>());
+    assert(w.try_resource<DeltaTime>() == nullptr);
+    // remove again is a no-op
+    w.remove_resource<DeltaTime>();
+    std::printf("  resource has/remove: OK\n");
+}
+
+void test_resource_destructor() {
+    // std::string resource — sanitizer will catch leaks
+    {
+        World w;
+        w.set_resource(std::string("a long string to avoid small string optimization entirely"));
+        assert(w.resource<std::string>() ==
+               "a long string to avoid small string optimization entirely");
+        // world destruction cleans up the resource
+    }
+    // Overwrite also cleans up the old value
+    {
+        World w;
+        w.set_resource(std::string("first"));
+        w.set_resource(std::string("second"));
+        assert(w.resource<std::string>() == "second");
+    }
+    std::printf("  resource destructor: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -615,6 +678,12 @@ int main() {
     test_deferred_destroy_during_iteration();
     test_deferred_add_during_iteration();
     test_deferred_manual_flush();
+    std::printf("  -- Phase 3 --\n");
+    test_resource_set_get();
+    test_resource_overwrite();
+    test_resource_try_nullptr();
+    test_resource_has_remove();
+    test_resource_destructor();
     std::printf("All tests passed!\n");
     return 0;
 }
