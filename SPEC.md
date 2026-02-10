@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.1.0
+**Version:** 0.3.0
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -24,6 +24,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 - Serialization. No built-in save/load.
 - Reactive/event systems. No observers or change detection.
 - Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. Optimization (e.g., bitset archetype matching, chunk allocation) is deferred.
+- Singleton resources. World-level unique data not yet supported.
 
 ---
 
@@ -149,7 +150,15 @@ All three are O(1): index into `records_` by entity index, then index into the a
 
 **Migration procedure (remove):** Same as add, but the target TypeSet excludes the removed component. The removed component is destroyed during the swap-remove of the old row.
 
-### 3.4 Query Iteration
+### 3.4 Utility Queries
+
+| Method | Signature | Description |
+|---|---|---|
+| `count` | `size_t count() const` | Total live entity count across all archetypes. |
+| `count<Ts...>` | `size_t count<Ts...>() const` | Count of entities whose archetype contains all of `{Ts...}`. |
+| `single<Ts...>` | `void single<Ts...>(Func&& fn)` | Calls `fn(Entity, Ts&...)` for the one entity matching `{Ts...}`. Asserts if zero or more than one entity matches. |
+
+### 3.5 Query Iteration
 
 ```cpp
 template <typename... Ts, typename Func>
@@ -158,7 +167,14 @@ void each(Func&& fn);
 
 Calls `fn(Entity, Ts&...)` for every entity whose archetype contains all of `{Ts...}`.
 
-**Matching:** On each call, iterates all archetypes and checks whether each is a superset of the requested types. This is O(A * Q) where A is the number of archetypes and Q is the number of queried types. For typical entity counts (hundreds of archetypes at most), this is negligible.
+**Exclude filters:** An overload accepts an `Exclude<Ex...>` tag to skip archetypes containing any of the excluded types:
+
+```cpp
+template <typename... Ts, typename... Ex, typename Func>
+void each(Exclude<Ex...>, Func&& fn);
+```
+
+**Matching:** Queries use an internal cache keyed by `(include_types, exclude_types)`. The cache stores a `vector<Archetype*>` of matching archetypes and is invalidated when new archetypes are created (tracked via a generation counter). This makes repeated queries O(1) when the archetype set is stable.
 
 **Iteration:** Within a matched archetype, retrieves typed pointers to each column's raw buffer and indexes linearly. This is the cache-friendly hot path — no indirection per entity.
 
@@ -167,9 +183,43 @@ template <typename... Ts, typename Func>
 void each_no_entity(Func&& fn);
 ```
 
-Same as `each` but calls `fn(Ts&...)` without the entity handle.
+Same as `each` but calls `fn(Ts&...)` without the entity handle. Also supports the `Exclude` overload.
 
-**Constraint:** The callback must not perform structural changes (create, destroy, add, remove) on the world during iteration. Doing so invalidates the column pointers held by the loop. (Deferred command buffers are a planned feature to lift this restriction.)
+**Constraint:** The callback must not perform structural changes (create, destroy, add, remove) on the world during iteration. Doing so invalidates the column pointers held by the loop. A debug-mode `iterating_` flag asserts on violations. Use `world.deferred()` to queue structural changes for execution after iteration (see §3.6).
+
+### 3.6 Deferred Commands
+
+During `each()` iteration, structural changes are forbidden. The deferred command system lets users queue operations during iteration and apply them afterward.
+
+**World-owned deferred proxy:**
+
+```cpp
+World::DeferredProxy deferred();
+void flush_deferred();
+```
+
+`deferred()` returns a lightweight proxy object with the same structural API as World (`destroy`, `add<T>`, `remove<T>`, `create_with<Ts...>`), but all operations are recorded rather than executed. `flush_deferred()` executes all recorded commands in order and clears the buffer. It asserts `!iterating_`.
+
+Commands are executed in recording order. This means ordering matters — e.g., if `destroy(e)` is recorded before `add(e, T{})`, the entity will be dead when the add runs, and the add becomes a no-op.
+
+`create_with` returns `void` (not `Entity`) since the entity does not exist until flush.
+
+**Standalone CommandBuffer:**
+
+```cpp
+class CommandBuffer {
+    void destroy(Entity);
+    void add<T>(Entity, T&&);
+    void remove<T>(Entity);
+    void create_with<Ts...>(Ts&&...);
+    void flush(World&);
+    bool empty() const;
+};
+```
+
+A standalone command buffer with the same API. Useful when commands need to be accumulated across multiple systems or frames before flushing.
+
+**Implementation:** Both `DeferredProxy` and `CommandBuffer` store commands as `std::function<void(World&)>` lambdas. Component data is kept alive via `std::shared_ptr`. This is simple and correct; performance optimization (custom type-erased storage) is deferred to Phase 7 if profiling warrants it.
 
 ---
 
@@ -183,6 +233,8 @@ class SystemRegistry {
 ```
 
 An ordered list of named `function<void(World&)>`. Systems execute in insertion order. No dependency resolution, no parallelism. This is intentionally minimal — scheduling belongs in the application layer or a future extension.
+
+**Deferred command flush:** `run_all` calls `world.flush_deferred()` after each system returns. This ensures deferred commands from system N are applied before system N+1 runs, giving each system a consistent view of the world.
 
 ---
 
@@ -240,38 +292,42 @@ These must hold at all times outside of an in-progress structural operation:
 These are accepted constraints of the current implementation, not bugs.
 
 1. **Not thread-safe.** No synchronization on any data structure. A single World must be accessed from one thread at a time.
-2. **No structural changes during iteration.** `each()` holds raw pointers into column buffers. Creating, destroying, or migrating entities during a callback is undefined behavior.
+2. **No structural changes during iteration.** `each()` holds raw pointers into column buffers. Direct structural changes during a callback trigger a debug assertion. Use `world.deferred()` to queue changes safely (see §3.6).
 3. **Component type IDs are not stable across builds.** IDs are assigned by call order, which can vary with compiler, link order, or code changes. Cannot be used as serialization keys.
 4. **Global column factory registry.** The factory map is a process-wide singleton. Multiple `World` instances share it (harmless in practice, but not isolated).
-5. **Archetype matching is linear scan.** Each `each()` call checks all archetypes. Fine for typical counts (<100 archetypes) but scales linearly.
-6. **No query caching.** Matched archetypes are recomputed on every `each()` call.
-7. **Migration cost.** Adding/removing a component moves all of an entity's components to a new archetype. Frequent single-component changes on entities with many components are expensive.
-8. **Hierarchy consistency is manual.** `Parent` and `Children` can become inconsistent if the application doesn't update both sides.
+5. **Migration cost.** Adding/removing a component moves all of an entity's components to a new archetype. Frequent single-component changes on entities with many components are expensive.
+6. **Hierarchy consistency is manual.** `Parent` and `Children` can become inconsistent if the application doesn't update both sides.
+7. **Deferred command overhead.** Each deferred command allocates a `std::function` + `std::shared_ptr` for component data. Adequate for typical use; custom type-erased storage is a potential Phase 7 optimization.
 
 ---
 
 ## 8. Roadmap
 
-Planned features, roughly ordered by priority. Each item should get its own spec section before implementation.
+Planned features, roughly ordered by priority. Each item should get its own spec section before implementation. See `IMPLEMENTATION.md` for detailed phased plan and progress tracking.
+
+### 8.0 Completed
+
+- ~~Deferred command buffer~~ — §3.6. Queue structural changes during iteration, flush after.
+- ~~Query caching~~ — §3.5. Cached per query signature, invalidated on archetype creation.
+- ~~Exclude filters~~ — §3.5. `each<A, B>(Exclude<C>{}, fn)`.
+- ~~Utility queries~~ — §3.4. `count()`, `count<Ts...>()`, `single<Ts...>()`.
+- ~~Debug-mode invariant checks~~ — `ECS_ASSERT` guards on all structural operations.
+- ~~Sanitizer build~~ — `cmake -DECS_SANITIZE=ON`.
 
 ### 8.1 Near-Term
 
-- **Deferred command buffer.** Queue structural changes (create, destroy, add, remove) during iteration, flush after. Eliminates the "no structural changes during iteration" footgun.
-- **Query caching.** Cache the set of matched archetypes per query signature. Invalidate on archetype creation. Reduces per-frame overhead for many queries.
-- **Exclude filters on queries.** `world.each<A, B>(exclude<C>, fn)` — match archetypes that have A and B but not C. Required for clean "find roots" patterns without per-entity `has<>` checks.
-- **Entity count / has-any-of queries.** `world.count<T>()`, `world.any()`, etc.
+- **Singleton resources.** World-level unique data (e.g., `DeltaTime`, `InputState`) accessible without entity queries.
+- **Observers / hooks.** Register callbacks for component add/remove events on specific types. Enables reactive patterns without polling.
 
 ### 8.2 Mid-Term
 
 - **Automatic hierarchy consistency.** Adding `Parent` to an entity automatically updates the parent's `Children`, and vice versa. Destruction of a parent cascades or orphans children (configurable).
-- **Observers / hooks.** Register callbacks for component add/remove events on specific types. Enables reactive patterns without polling.
-- **Singleton components.** World-level unique resources (e.g., `DeltaTime`, `InputState`) accessible without entity queries.
 - **Sorting within archetypes.** Allow sorting an archetype's entities by a component field for spatial or rendering order.
 
 ### 8.3 Long-Term
 
+- **Performance foundations.** Bitset archetype matching, chunk allocation for better memory patterns.
 - **Parallel iteration.** Split archetype iteration across threads. Requires read/write access declarations per system and a dependency-aware scheduler.
-- **Chunk allocation.** Fixed-size archetype chunks (e.g., 16KB) for better memory allocation patterns and potential SIMD alignment.
 - **Serialization.** Stable type IDs (string-based or hash-based registration) and binary/JSON world snapshots.
 - **Scripting bridge.** Type-erased component access for dynamic languages (Python, Lua). Likely via string-keyed component lookup and void* accessors.
 - **Prefabs / templates.** Define archetype templates for batch entity creation with shared defaults.
@@ -284,19 +340,25 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 ecs/
 ├── CMakeLists.txt                              Build: header-only INTERFACE lib + test exe
 ├── SPEC.md                                     This document
+├── IMPLEMENTATION.md                           Phased build plan and progress tracker
+├── CLAUDE.md                                   Claude Code guidelines
 ├── include/ecs/
 │   ├── ecs.hpp                                 Convenience include-all
 │   ├── entity.hpp                              Entity, INVALID_ENTITY, EntityHash
 │   ├── component.hpp                           ComponentTypeID, component_id<T>(), ComponentColumn, column factory
 │   ├── archetype.hpp                           TypeSet, TypeSetHash, Archetype, ArchetypeEdge
-│   ├── world.hpp                               World (main API), EntityRecord, query iteration
-│   ├── system.hpp                              SystemRegistry
+│   ├── world.hpp                               World (main API), EntityRecord, DeferredProxy, query cache
+│   ├── command_buffer.hpp                      CommandBuffer (standalone deferred command queue)
+│   ├── system.hpp                              SystemRegistry (auto-flushes deferred commands)
 │   └── builtin/
 │       ├── transform.hpp                       Mat4, LocalTransform, WorldTransform
 │       ├── hierarchy.hpp                       Parent, Children
 │       └── transform_propagation.hpp           propagate_transforms()
-└── tests/
-    └── main.cpp                                Test suite
+├── tests/
+│   └── main.cpp                                Test suite
+└── examples/
+    ├── visual_harness/                         Raylib visual demo
+    └── stress_harness/                         Performance stress test
 ```
 
 ---

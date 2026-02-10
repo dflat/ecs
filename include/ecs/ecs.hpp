@@ -1,6 +1,7 @@
 #pragma once
 
 #include "archetype.hpp"
+#include "command_buffer.hpp"
 #include "component.hpp"
 #include "entity.hpp"
 #include "system.hpp"

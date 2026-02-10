@@ -455,6 +455,127 @@ void test_query_cache_invalidation() {
     std::printf("  query cache invalidation: OK\n");
 }
 
+// -- Phase 2.1: CommandBuffer standalone --
+
+void test_command_buffer_basic() {
+    World w;
+    CommandBuffer cb;
+
+    // Queue a create
+    cb.create_with(Position{10, 20}, Velocity{1, 2});
+    // Queue a destroy
+    Entity to_kill = w.create_with(Health{100});
+    cb.destroy(to_kill);
+    // Queue an add
+    Entity target = w.create_with(Position{0, 0});
+    cb.add(target, Health{50});
+    // Queue a remove
+    Entity to_strip = w.create_with(Position{5, 5}, Velocity{1, 1});
+    cb.remove<Velocity>(to_strip);
+
+    assert(!cb.empty());
+    cb.flush(w);
+    assert(cb.empty());
+
+    // Verify: created entity exists
+    assert((w.count<Position, Velocity>() == 1)); // the created one (to_strip lost Velocity)
+    // to_kill is dead
+    assert(!w.alive(to_kill));
+    // target has Health
+    assert(w.has<Health>(target));
+    assert(w.get<Health>(target).hp == 50);
+    // to_strip lost Velocity
+    assert(!w.has<Velocity>(to_strip));
+    assert(w.has<Position>(to_strip));
+    std::printf("  command buffer basic: OK\n");
+}
+
+void test_command_buffer_empty_flush() {
+    World w;
+    CommandBuffer cb;
+    assert(cb.empty());
+    cb.flush(w); // no-op
+    assert(w.count() == 0);
+    std::printf("  command buffer empty flush: OK\n");
+}
+
+void test_command_buffer_nontrivial_types() {
+    World w;
+    CommandBuffer cb;
+    std::string long_str = "this is a long string to avoid small string optimization entirely";
+    cb.create_with(std::string(long_str));
+    cb.flush(w);
+    assert(w.count<std::string>() == 1);
+    w.each<std::string>([&](Entity, std::string& s) { assert(s == long_str); });
+    std::printf("  command buffer nontrivial types: OK\n");
+}
+
+void test_command_buffer_destroy_then_add() {
+    World w;
+    Entity e = w.create_with(Position{1, 2});
+    CommandBuffer cb;
+    cb.destroy(e);
+    cb.add(e, Health{999}); // entity will be dead when this runs
+    cb.flush(w);
+    assert(!w.alive(e));
+    // Health add was a no-op since entity is dead
+    assert(w.count<Health>() == 0);
+    std::printf("  command buffer destroy then add: OK\n");
+}
+
+// -- Phase 2.2: Integration with iteration --
+
+void test_deferred_destroy_during_iteration() {
+    World w;
+    w.create_with(Position{1, 0});
+    w.create_with(Position{2, 0});
+    w.create_with(Position{3, 0});
+
+    SystemRegistry systems;
+    systems.add("destroyer", [](World& world) {
+        world.each<Position>([&](Entity e, Position& p) {
+            if (p.x == 2.0f)
+                world.deferred().destroy(e);
+        });
+    });
+
+    systems.run_all(w);
+    assert(w.count<Position>() == 2);
+    // Verify the right entity was destroyed
+    float sum = 0;
+    w.each<Position>([&](Entity, Position& p) { sum += p.x; });
+    assert(sum == 4.0f); // 1 + 3
+    std::printf("  deferred destroy during iteration: OK\n");
+}
+
+void test_deferred_add_during_iteration() {
+    World w;
+    Entity e = w.create_with(Position{5, 5});
+
+    SystemRegistry systems;
+    systems.add("adder", [e](World& world) {
+        world.each<Position>([&](Entity, Position&) { world.deferred().add(e, Health{42}); });
+    });
+
+    systems.run_all(w);
+    assert(w.has<Health>(e));
+    assert(w.get<Health>(e).hp == 42);
+    std::printf("  deferred add during iteration: OK\n");
+}
+
+void test_deferred_manual_flush() {
+    World w;
+    Entity e = w.create_with(Position{1, 0});
+
+    w.each<Position>([&](Entity, Position&) { w.deferred().add(e, Velocity{9, 9}); });
+
+    assert(!w.has<Velocity>(e)); // not flushed yet
+    w.flush_deferred();
+    assert(w.has<Velocity>(e));
+    assert(w.get<Velocity>(e).dx == 9.0f);
+    std::printf("  deferred manual flush: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -485,6 +606,15 @@ int main() {
     test_single_assert_multi();
     std::printf("  -- Phase 1.3 --\n");
     test_query_cache_invalidation();
+    std::printf("  -- Phase 2.1 --\n");
+    test_command_buffer_basic();
+    test_command_buffer_empty_flush();
+    test_command_buffer_nontrivial_types();
+    test_command_buffer_destroy_then_add();
+    std::printf("  -- Phase 2.2 --\n");
+    test_deferred_destroy_during_iteration();
+    test_deferred_add_during_iteration();
+    test_deferred_manual_flush();
     std::printf("All tests passed!\n");
     return 0;
 }

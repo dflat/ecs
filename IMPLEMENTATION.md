@@ -26,8 +26,8 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 1.3 Query caching
 
 ### Phase 2 — Deferred Commands
-- [ ] 2.1 CommandBuffer
-- [ ] 2.2 Integration with iteration
+- [x] 2.1 CommandBuffer
+- [x] 2.2 Integration with iteration
 
 ### Phase 3 — Singleton Resources
 - [ ] 3.1 Resource storage

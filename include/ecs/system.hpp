@@ -16,8 +16,10 @@ public:
     }
 
     void run_all(World& world) {
-        for (auto& [name, fn] : systems_)
+        for (auto& [name, fn] : systems_) {
             fn(world);
+            world.flush_deferred();
+        }
     }
 
 private:
