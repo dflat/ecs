@@ -85,6 +85,12 @@ public:
         arch->assert_parity();
 
         records_[idx] = {arch, row};
+
+        // Fire on_add hooks after record is set (so get<T>(e) works in hooks)
+        (fire_hooks(on_add_hooks_, component_id<std::decay_t<Ts>>(), e,
+                    arch->columns.at(component_id<std::decay_t<Ts>>()).get(row)),
+         ...);
+
         return e;
     }
 
@@ -95,7 +101,13 @@ public:
         if (!alive(e))
             return;
         auto& rec = records_[e.index];
-        Entity swapped = rec.archetype->swap_remove(rec.row);
+        Archetype* arch = rec.archetype;
+
+        // Fire on_remove hooks before data is destroyed
+        for (auto& [cid, col] : arch->columns)
+            fire_hooks(on_remove_hooks_, cid, e, col.get(rec.row));
+
+        Entity swapped = arch->swap_remove(rec.row);
         if (swapped != INVALID_ENTITY) {
             records_[swapped.index].row = rec.row;
         }
@@ -243,6 +255,24 @@ public:
         resources_.erase(component_id<T>());
     }
 
+    // -- Observers --
+
+    template <typename T>
+    void on_add(std::function<void(World&, Entity, T&)> fn) {
+        auto cid = component_id<std::decay_t<T>>();
+        on_add_hooks_[cid].push_back([fn = std::move(fn)](World& w, Entity e, void* ptr) {
+            fn(w, e, *static_cast<T*>(ptr));
+        });
+    }
+
+    template <typename T>
+    void on_remove(std::function<void(World&, Entity, T&)> fn) {
+        auto cid = component_id<std::decay_t<T>>();
+        on_remove_hooks_[cid].push_back([fn = std::move(fn)](World& w, Entity e, void* ptr) {
+            fn(w, e, *static_cast<T*>(ptr));
+        });
+    }
+
     // -- Component access --
 
     template <typename T>
@@ -295,6 +325,9 @@ public:
         auto& col = new_arch->columns.at(cid);
         std::decay_t<T> tmp = std::forward<T>(component);
         col.push_raw(&tmp);
+
+        // Fire on_add after data is in place and record is updated
+        fire_hooks(on_add_hooks_, cid, e, new_arch->columns.at(cid).get(records_[e.index].row));
     }
 
     // -- Remove component (archetype migration) --
@@ -314,8 +347,9 @@ public:
         Archetype* new_arch = find_remove_target(old_arch, cid);
         size_t old_row = rec.row;
 
-        // Before migration, destroy the removed component
-        // Migration will move everything except the removed component
+        // Fire on_remove before data is destroyed
+        fire_hooks(on_remove_hooks_, cid, e, old_arch->columns.at(cid).get(old_row));
+
         migrate_entity_removing(e, old_arch, new_arch, old_row, cid);
     }
 
@@ -442,6 +476,23 @@ private:
     std::unordered_map<ComponentTypeID, ErasedResource> resources_;
     bool iterating_ = false;
     std::vector<std::function<void(World&)>> deferred_commands_;
+
+    // -- Observer hooks --
+    std::unordered_map<ComponentTypeID, std::vector<std::function<void(World&, Entity, void*)>>>
+        on_add_hooks_;
+    std::unordered_map<ComponentTypeID, std::vector<std::function<void(World&, Entity, void*)>>>
+        on_remove_hooks_;
+
+    void fire_hooks(
+        const std::unordered_map<ComponentTypeID,
+                                 std::vector<std::function<void(World&, Entity, void*)>>>& hooks,
+        ComponentTypeID cid, Entity e, void* data) {
+        auto it = hooks.find(cid);
+        if (it == hooks.end())
+            return;
+        for (auto& fn : it->second)
+            fn(*this, e, data);
+    }
 
     // -- Query cache --
     struct QueryKey {

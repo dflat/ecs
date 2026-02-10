@@ -639,6 +639,124 @@ void test_resource_destructor() {
     std::printf("  resource destructor: OK\n");
 }
 
+// --- Phase 4: Observers ---
+
+void test_on_add_fires() {
+    World w;
+    int called = 0;
+    Entity captured{};
+    w.on_add<Health>(std::function<void(World&, Entity, Health&)>([&](World&, Entity e, Health& h) {
+        ++called;
+        captured = e;
+        assert(h.hp == 42);
+    }));
+
+    Entity e = w.create();
+    w.add(e, Health{42});
+    assert(called == 1);
+    assert(captured == e);
+    std::printf("  on_add fires: OK\n");
+}
+
+void test_on_add_create_with() {
+    World w;
+    int called = 0;
+    w.on_add<Health>(std::function<void(World&, Entity, Health&)>([&](World&, Entity, Health& h) {
+        ++called;
+        assert(h.hp == 99);
+    }));
+
+    w.create_with(Health{99});
+    assert(called == 1);
+    std::printf("  on_add create_with: OK\n");
+}
+
+void test_on_remove_fires() {
+    World w;
+    int called = 0;
+    w.on_remove<Health>(
+        std::function<void(World&, Entity, Health&)>([&](World&, Entity, Health& h) {
+            ++called;
+            assert(h.hp == 77);
+        }));
+
+    Entity e = w.create_with(Health{77}, Position{0, 0});
+    w.remove<Health>(e);
+    assert(called == 1);
+    std::printf("  on_remove fires: OK\n");
+}
+
+void test_on_remove_destroy() {
+    World w;
+    int called = 0;
+    w.on_remove<Health>(
+        std::function<void(World&, Entity, Health&)>([&](World&, Entity, Health& h) {
+            ++called;
+            assert(h.hp == 55);
+        }));
+
+    Entity e = w.create_with(Health{55});
+    w.destroy(e);
+    assert(called == 1);
+    std::printf("  on_remove destroy: OK\n");
+}
+
+void test_on_add_not_on_overwrite() {
+    World w;
+    int called = 0;
+    w.on_add<Health>(
+        std::function<void(World&, Entity, Health&)>([&](World&, Entity, Health&) { ++called; }));
+
+    Entity e = w.create_with(Health{10});
+    assert(called == 1);  // fired on create_with
+    w.add(e, Health{20}); // overwrite — should NOT fire
+    assert(called == 1);
+    std::printf("  on_add not on overwrite: OK\n");
+}
+
+void test_multiple_hooks() {
+    World w;
+    std::vector<int> order;
+    w.on_add<Health>(std::function<void(World&, Entity, Health&)>(
+        [&](World&, Entity, Health&) { order.push_back(1); }));
+    w.on_add<Health>(std::function<void(World&, Entity, Health&)>(
+        [&](World&, Entity, Health&) { order.push_back(2); }));
+
+    w.create_with(Health{10});
+    assert(order.size() == 2);
+    assert(order[0] == 1);
+    assert(order[1] == 2);
+    std::printf("  multiple hooks: OK\n");
+}
+
+void test_hook_receives_correct_data() {
+    World w;
+    w.on_add<Health>(
+        std::function<void(World&, Entity, Health&)>([](World& world, Entity e, Health& h) {
+            // Can read the value
+            assert(h.hp == 100);
+            // Can also read via get<T>
+            assert(world.get<Health>(e).hp == 100);
+            // Can mutate
+            h.hp = 200;
+        }));
+
+    Entity e = w.create_with(Health{100});
+    assert(w.get<Health>(e).hp == 200); // mutated by hook
+    std::printf("  hook receives correct data: OK\n");
+}
+
+void test_hook_structural_change_other_entity() {
+    World w;
+    Entity other = w.create();
+    w.on_add<Health>(std::function<void(World&, Entity, Health&)>(
+        [other](World& world, Entity, Health&) { world.add(other, Tag{}); }));
+
+    w.create_with(Health{10});
+    assert(w.has<Tag>(other));
+    std::printf("  hook structural change other entity: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -684,6 +802,15 @@ int main() {
     test_resource_try_nullptr();
     test_resource_has_remove();
     test_resource_destructor();
+    std::printf("  -- Phase 4 --\n");
+    test_on_add_fires();
+    test_on_add_create_with();
+    test_on_remove_fires();
+    test_on_remove_destroy();
+    test_on_add_not_on_overwrite();
+    test_multiple_hooks();
+    test_hook_receives_correct_data();
+    test_hook_structural_change_other_entity();
     std::printf("All tests passed!\n");
     return 0;
 }

@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.3.0
+**Version:** 0.4.0
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -22,7 +22,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 
 - Thread safety. All operations assume single-threaded access to a `World`.
 - Serialization. No built-in save/load.
-- Reactive/event systems. No observers or change detection.
+- ~~Reactive/event systems.~~ Basic observers implemented in Phase 4 — see §3.8.
 - Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. Optimization (e.g., bitset archetype matching, chunk allocation) is deferred.
 - ~~Singleton resources.~~ Implemented in Phase 3 — see §3.7.
 
@@ -237,6 +237,33 @@ Resources use the same `component_id<T>()` namespace as components but occupy se
 
 Resources are destroyed when the `World` is destroyed, or when overwritten/removed. Destruction order of multiple resources is unspecified.
 
+### 3.8 Observers (Component Lifecycle Hooks)
+
+Register callbacks that fire when a component of a given type is added to or removed from any entity:
+
+```cpp
+template <typename T>
+void on_add(std::function<void(World&, Entity, T&)> fn);
+
+template <typename T>
+void on_remove(std::function<void(World&, Entity, T&)> fn);
+```
+
+**Semantics:**
+
+- `on_add` fires after the component data is placed in the archetype and the entity's record is updated. This means `get<T>(e)` works inside callbacks.
+- `on_remove` fires before the component data is destroyed (before migration or swap-remove).
+- `on_add` does **not** fire on overwrite. When `add<T>()` is called on an entity that already has `T`, only the data is updated — no hook fires.
+- Multiple hooks per type are supported and fire in registration order.
+- Hooks fire for all structural paths: `create_with`, `add` (migration only), `remove`, and `destroy`.
+
+**Re-entry:** Hooks may perform structural changes on **other** entities (e.g., `world.add<X>(other_entity)`), but modifying the observed entity is undefined behavior. This is documented but not enforced at runtime.
+
+**Hook ordering for multi-component operations:**
+
+- `create_with<A, B, C>()`: `on_add` fires per component in template pack order.
+- `destroy()`: `on_remove` fires per component in archetype column iteration order (unspecified).
+
 ---
 
 ## 4. System Registry
@@ -330,13 +357,14 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Debug-mode invariant checks~~ — `ECS_ASSERT` guards on all structural operations.
 - ~~Sanitizer build~~ — `cmake -DECS_SANITIZE=ON`.
 - ~~Singleton resources~~ — §3.7. Typed global data on World, independent of entities.
+- ~~Observers / hooks~~ — §3.8. Component lifecycle callbacks (`on_add`, `on_remove`).
 
 ### 8.1 Near-Term
-- **Observers / hooks.** Register callbacks for component add/remove events on specific types. Enables reactive patterns without polling.
+
+- **Automatic hierarchy consistency.** Adding `Parent` to an entity automatically updates the parent's `Children`, and vice versa. Destruction of a parent cascades or orphans children (configurable).
 
 ### 8.2 Mid-Term
 
-- **Automatic hierarchy consistency.** Adding `Parent` to an entity automatically updates the parent's `Children`, and vice versa. Destruction of a parent cascades or orphans children (configurable).
 - **Sorting within archetypes.** Allow sorting an archetype's entities by a component field for spatial or rendering order.
 
 ### 8.3 Long-Term

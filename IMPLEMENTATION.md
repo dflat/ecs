@@ -33,7 +33,7 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 3.1 Resource storage
 
 ### Phase 4 — Observers
-- [ ] 4.1 Component lifecycle hooks
+- [x] 4.1 Component lifecycle hooks
 
 ### Phase 5 — Automatic Hierarchy Consistency
 - [ ] 5.1 Managed hierarchy operations
