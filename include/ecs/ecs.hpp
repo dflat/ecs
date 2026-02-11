@@ -8,5 +8,6 @@
 #include "world.hpp"
 
 #include "builtin/hierarchy.hpp"
+#include "builtin/hierarchy_ops.hpp"
 #include "builtin/transform.hpp"
 #include "builtin/transform_propagation.hpp"

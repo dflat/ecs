@@ -36,8 +36,8 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 4.1 Component lifecycle hooks
 
 ### Phase 5 — Automatic Hierarchy Consistency
-- [ ] 5.1 Managed hierarchy operations
-- [ ] 5.2 Refactor transform propagation
+- [x] 5.1 Managed hierarchy operations
+- [x] 5.2 Refactor transform propagation
 
 ### Phase 6 — Archetype Sorting
 - [ ] 6.1 Sort entities within an archetype

@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.4.0
+**Version:** 0.5.0
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -300,7 +300,15 @@ These are ordinary components shipped with the library for convenience. They hav
 | `Parent` | `Entity entity` | Points to parent entity. |
 | `Children` | `vector<Entity> entities` | Lists child entities. |
 
-Hierarchy is maintained manually: the application is responsible for keeping `Parent` and `Children` consistent. (Automatic consistency enforcement is a potential future feature.)
+**Managed hierarchy operations** (free functions in `builtin/hierarchy_ops.hpp`):
+
+| Function | Signature | Description |
+|---|---|---|
+| `set_parent` | `void set_parent(World&, Entity child, Entity parent)` | Set child's parent, keeping both sides in sync. Handles re-parenting (removes from old parent's Children). Creates Children component on parent if absent. No-op if child or parent is dead. Asserts on self-parenting. |
+| `remove_parent` | `void remove_parent(World&, Entity child)` | Orphan child: remove from parent's Children, remove Parent component. No-op if child is dead or has no parent. |
+| `destroy_recursive` | `void destroy_recursive(World&, Entity root)` | Destroy entity and all descendants via BFS. Destroys leaves first to avoid dangling references. |
+
+These functions are the recommended way to manage hierarchy. Direct manipulation of `Parent` and `Children` is still possible but requires the application to maintain consistency.
 
 ### 5.3 Transform Propagation
 
@@ -339,7 +347,7 @@ These are accepted constraints of the current implementation, not bugs.
 3. **Component type IDs are not stable across builds.** IDs are assigned by call order, which can vary with compiler, link order, or code changes. Cannot be used as serialization keys.
 4. **Global column factory registry.** The factory map is a process-wide singleton. Multiple `World` instances share it (harmless in practice, but not isolated).
 5. **Migration cost.** Adding/removing a component moves all of an entity's components to a new archetype. Frequent single-component changes on entities with many components are expensive.
-6. **Hierarchy consistency is manual.** `Parent` and `Children` can become inconsistent if the application doesn't update both sides.
+6. **Hierarchy consistency requires helper functions.** Use `set_parent`, `remove_parent`, and `destroy_recursive` (from `builtin/hierarchy_ops.hpp`) for automatic bidirectional consistency. Direct manipulation of `Parent` and `Children` is possible but the application must keep both sides in sync.
 7. **Deferred command overhead.** Each deferred command allocates a `std::function` + `std::shared_ptr` for component data. Adequate for typical use; custom type-erased storage is a potential Phase 7 optimization.
 
 ---
@@ -358,10 +366,7 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Sanitizer build~~ — `cmake -DECS_SANITIZE=ON`.
 - ~~Singleton resources~~ — §3.7. Typed global data on World, independent of entities.
 - ~~Observers / hooks~~ — §3.8. Component lifecycle callbacks (`on_add`, `on_remove`).
-
-### 8.1 Near-Term
-
-- **Automatic hierarchy consistency.** Adding `Parent` to an entity automatically updates the parent's `Children`, and vice versa. Destruction of a parent cascades or orphans children (configurable).
+- ~~Automatic hierarchy consistency~~ — §5.2. Managed operations (`set_parent`, `remove_parent`, `destroy_recursive`).
 
 ### 8.2 Mid-Term
 
@@ -396,6 +401,7 @@ ecs/
 │   └── builtin/
 │       ├── transform.hpp                       Mat4, LocalTransform, WorldTransform
 │       ├── hierarchy.hpp                       Parent, Children
+│       ├── hierarchy_ops.hpp                   set_parent(), remove_parent(), destroy_recursive()
 │       └── transform_propagation.hpp           propagate_transforms()
 ├── tests/
 │   └── main.cpp                                Test suite

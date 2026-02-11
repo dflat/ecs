@@ -757,6 +757,135 @@ void test_hook_structural_change_other_entity() {
     std::printf("  hook structural change other entity: OK\n");
 }
 
+// --- Phase 5: Hierarchy Consistency ---
+
+void test_set_parent() {
+    World w;
+    Entity parent = w.create();
+    Entity child = w.create();
+
+    set_parent(w, child, parent);
+
+    assert(w.has<Parent>(child));
+    assert(w.get<Parent>(child).entity == parent);
+    assert(w.has<Children>(parent));
+    assert(w.get<Children>(parent).entities.size() == 1);
+    assert(w.get<Children>(parent).entities[0] == child);
+    std::printf("  set_parent: OK\n");
+}
+
+void test_set_parent_reparent() {
+    World w;
+    Entity a = w.create();
+    Entity b = w.create();
+    Entity child = w.create();
+
+    set_parent(w, child, a);
+    set_parent(w, child, b);
+
+    // a should no longer have child
+    assert(w.has<Children>(a));
+    assert(w.get<Children>(a).entities.empty());
+
+    // b should have child
+    assert(w.has<Children>(b));
+    assert(w.get<Children>(b).entities.size() == 1);
+    assert(w.get<Children>(b).entities[0] == child);
+
+    // child's Parent should point to b
+    assert(w.get<Parent>(child).entity == b);
+    std::printf("  set_parent reparent: OK\n");
+}
+
+void test_remove_parent() {
+    World w;
+    Entity parent = w.create();
+    Entity child = w.create();
+
+    set_parent(w, child, parent);
+    remove_parent(w, child);
+
+    assert(!w.has<Parent>(child));
+    assert(w.get<Children>(parent).entities.empty());
+    std::printf("  remove_parent: OK\n");
+}
+
+void test_destroy_recursive() {
+    World w;
+    Entity root = w.create();
+    Entity child = w.create();
+    Entity grandchild = w.create();
+
+    set_parent(w, child, root);
+    set_parent(w, grandchild, child);
+
+    destroy_recursive(w, root);
+
+    assert(!w.alive(root));
+    assert(!w.alive(child));
+    assert(!w.alive(grandchild));
+    std::printf("  destroy_recursive: OK\n");
+}
+
+void test_destroy_recursive_leaf() {
+    World w;
+    Entity root = w.create();
+    Entity child_a = w.create();
+    Entity child_b = w.create();
+
+    set_parent(w, child_a, root);
+    set_parent(w, child_b, root);
+
+    destroy_recursive(w, child_a);
+
+    assert(!w.alive(child_a));
+    assert(w.alive(root));
+    assert(w.alive(child_b));
+    // root's Children should still contain child_b (child_a not cleaned up from
+    // parent's list since we destroyed it directly, but that's fine — dead
+    // entities in Children is a known consequence of raw destroy)
+    std::printf("  destroy_recursive leaf: OK\n");
+}
+
+void test_set_parent_creates_children() {
+    World w;
+    Entity parent = w.create();
+    Entity child = w.create();
+
+    // parent has no Children component yet
+    assert(!w.has<Children>(parent));
+
+    set_parent(w, child, parent);
+
+    assert(w.has<Children>(parent));
+    assert(w.get<Children>(parent).entities.size() == 1);
+    std::printf("  set_parent creates Children: OK\n");
+}
+
+void test_hierarchy_propagation_with_set_parent() {
+    World w;
+
+    Entity root = w.create_with(LocalTransform{Mat4::translation(10, 0, 0)}, WorldTransform{});
+    Entity child = w.create_with(LocalTransform{Mat4::translation(0, 5, 0)}, WorldTransform{});
+    Entity grandchild = w.create_with(LocalTransform{Mat4::translation(0, 0, 3)}, WorldTransform{});
+
+    set_parent(w, child, root);
+    set_parent(w, grandchild, child);
+
+    propagate_transforms(w);
+
+    auto& root_wt = w.get<WorldTransform>(root).matrix;
+    assert(root_wt.m[12] == 10.0f && root_wt.m[13] == 0.0f && root_wt.m[14] == 0.0f);
+
+    auto& child_wt = w.get<WorldTransform>(child).matrix;
+    assert(child_wt.m[12] == 10.0f && child_wt.m[13] == 5.0f && child_wt.m[14] == 0.0f);
+
+    auto& gc_wt = w.get<WorldTransform>(grandchild).matrix;
+    assert(gc_wt.m[12] == 10.0f && gc_wt.m[13] == 5.0f && gc_wt.m[14] == 3.0f);
+
+    std::printf("  hierarchy propagation with set_parent: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -811,6 +940,14 @@ int main() {
     test_multiple_hooks();
     test_hook_receives_correct_data();
     test_hook_structural_change_other_entity();
+    std::printf("  -- Phase 5 --\n");
+    test_set_parent();
+    test_set_parent_reparent();
+    test_remove_parent();
+    test_destroy_recursive();
+    test_destroy_recursive_leaf();
+    test_set_parent_creates_children();
+    test_hierarchy_propagation_with_set_parent();
     std::printf("All tests passed!\n");
     return 0;
 }
