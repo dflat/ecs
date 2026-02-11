@@ -18,6 +18,13 @@ if(ECS_SANITIZE)
     target_link_options(ecs_test PRIVATE -fsanitize=address,undefined)
 endif()
 
+option(ECS_BUILD_BENCHMARKS "Build benchmark programs" OFF)
+if(ECS_BUILD_BENCHMARKS)
+    add_executable(ecs_bench benchmarks/bench.cpp)
+    target_link_libraries(ecs_bench PRIVATE ecs)
+    target_compile_options(ecs_bench PRIVATE -Wall -Wextra -Wpedantic -O2)
+endif()
+
 option(ECS_BUILD_EXAMPLES "Build example programs" OFF)
 if(ECS_BUILD_EXAMPLES)
     add_subdirectory(examples)
