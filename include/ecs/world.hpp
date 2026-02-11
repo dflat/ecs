@@ -167,39 +167,179 @@ public:
         ECS_ASSERT(found == 1, "single<Ts...>() matched zero entities");
     }
 
+    // -- Type-erased command arena --
+
+    class CommandArena {
+        struct CmdHeader {
+            void (*execute)(void* data, World& w);
+            void (*destroy)(void* data);
+            size_t size; // total size including header + padding + data
+        };
+
+        static constexpr size_t BLOCK_SIZE = 4096;
+        static constexpr size_t HEADER_SIZE = sizeof(CmdHeader);
+
+        struct Block {
+            uint8_t* data;
+            size_t used;
+            size_t capacity;
+        };
+
+        std::vector<Block> blocks_;
+        size_t cmd_count_ = 0;
+
+        static size_t align_up(size_t val, size_t align) {
+            return (val + align - 1) & ~(align - 1);
+        }
+
+        void* allocate(size_t data_size, size_t /*data_align*/) {
+            // Layout: [CmdHeader][data] aligned to alignof(CmdHeader).
+            // Round total up to header alignment so the next command is also aligned.
+            static constexpr size_t HDR_ALIGN = alignof(CmdHeader);
+            size_t total = align_up(HEADER_SIZE + data_size, HDR_ALIGN);
+            if (blocks_.empty() || blocks_.back().capacity - blocks_.back().used < total) {
+                size_t cap = total > BLOCK_SIZE ? total : BLOCK_SIZE;
+                // Use aligned allocation for the block itself
+                auto* p = static_cast<uint8_t*>(std::malloc(cap));
+                ECS_ASSERT(p, "CommandArena: allocation failed");
+                blocks_.push_back({p, 0, cap});
+            }
+            auto& blk = blocks_.back();
+            void* ptr = blk.data + blk.used;
+            blk.used += total;
+            return ptr;
+        }
+
+    public:
+        CommandArena() = default;
+        ~CommandArena() { clear(); }
+        CommandArena(const CommandArena&) = delete;
+        CommandArena& operator=(const CommandArena&) = delete;
+        CommandArena(CommandArena&& o) noexcept
+            : blocks_(std::move(o.blocks_)), cmd_count_(o.cmd_count_) {
+            o.cmd_count_ = 0;
+        }
+        CommandArena& operator=(CommandArena&& o) noexcept {
+            if (this != &o) {
+                clear();
+                blocks_ = std::move(o.blocks_);
+                cmd_count_ = o.cmd_count_;
+                o.cmd_count_ = 0;
+            }
+            return *this;
+        }
+
+        template <typename Cmd, typename... Args>
+        void emplace(Args&&... args) {
+            void* raw = allocate(sizeof(Cmd), alignof(Cmd));
+            auto* hdr = static_cast<CmdHeader*>(raw);
+            void* data = static_cast<uint8_t*>(raw) + HEADER_SIZE;
+            hdr->execute = [](void* d, World& w) {
+                static_cast<Cmd*>(d)->execute(w);
+            };
+            hdr->destroy = [](void* d) {
+                static_cast<Cmd*>(d)->~Cmd();
+            };
+            hdr->size = align_up(HEADER_SIZE + sizeof(Cmd), alignof(CmdHeader));
+            new (data) Cmd(std::forward<Args>(args)...);
+            ++cmd_count_;
+        }
+
+        void execute_all(World& w) {
+            for (auto& blk : blocks_) {
+                size_t offset = 0;
+                while (offset < blk.used) {
+                    auto* hdr = reinterpret_cast<CmdHeader*>(blk.data + offset);
+                    void* data = blk.data + offset + HEADER_SIZE;
+                    hdr->execute(data, w);
+                    hdr->destroy(data);
+                    offset += hdr->size;
+                }
+            }
+            free_blocks();
+        }
+
+        void clear() {
+            // Destroy without executing
+            for (auto& blk : blocks_) {
+                size_t offset = 0;
+                while (offset < blk.used) {
+                    auto* hdr = reinterpret_cast<CmdHeader*>(blk.data + offset);
+                    void* data = blk.data + offset + HEADER_SIZE;
+                    hdr->destroy(data);
+                    offset += hdr->size;
+                }
+            }
+            free_blocks();
+        }
+
+        bool empty() const { return cmd_count_ == 0; }
+
+    private:
+        void free_blocks() {
+            for (auto& blk : blocks_)
+                std::free(blk.data);
+            blocks_.clear();
+            cmd_count_ = 0;
+        }
+    };
+
+    // -- Concrete command types (public for CommandBuffer access) --
+    struct DestroyCmd {
+        Entity e;
+        void execute(World& w) { w.destroy(e); }
+    };
+
+    template <typename T>
+    struct AddCmd {
+        Entity e;
+        T comp;
+        void execute(World& w) { w.add<T>(e, std::move(comp)); }
+    };
+
+    template <typename T>
+    struct RemoveCmd {
+        Entity e;
+        void execute(World& w) { w.remove<T>(e); }
+    };
+
+    template <typename... Ts>
+    struct CreateWithCmd {
+        std::tuple<Ts...> data;
+        void execute(World& w) {
+            std::apply([&w](auto&&... args) { w.create_with(std::move(args)...); },
+                       std::move(data));
+        }
+    };
+
+public:
     // -- Deferred commands --
 
     class DeferredProxy {
     public:
-        explicit DeferredProxy(std::vector<std::function<void(World&)>>& cmds) : cmds_(cmds) {}
+        explicit DeferredProxy(CommandArena& arena) : arena_(arena) {}
 
-        void destroy(Entity e) {
-            cmds_.push_back([e](World& w) { w.destroy(e); });
-        }
+        void destroy(Entity e) { arena_.emplace<DestroyCmd>(DestroyCmd{e}); }
 
         template <typename T>
         void add(Entity e, T&& comp) {
-            auto ptr = std::make_shared<std::decay_t<T>>(std::forward<T>(comp));
-            cmds_.push_back([e, ptr](World& w) { w.add<std::decay_t<T>>(e, std::move(*ptr)); });
+            using U = std::decay_t<T>;
+            arena_.emplace<AddCmd<U>>(AddCmd<U>{e, std::forward<T>(comp)});
         }
 
         template <typename T>
         void remove(Entity e) {
-            cmds_.push_back([e](World& w) { w.remove<std::decay_t<T>>(e); });
+            arena_.emplace<RemoveCmd<std::decay_t<T>>>(RemoveCmd<std::decay_t<T>>{e});
         }
 
         template <typename... Ts>
         void create_with(Ts&&... comps) {
-            auto data =
-                std::make_shared<std::tuple<std::decay_t<Ts>...>>(std::forward<Ts>(comps)...);
-            cmds_.push_back([data](World& w) {
-                std::apply([&w](auto&&... args) { w.create_with(std::move(args)...); },
-                           std::move(*data));
-            });
+            using Cmd = CreateWithCmd<std::decay_t<Ts>...>;
+            arena_.emplace<Cmd>(Cmd{std::tuple<std::decay_t<Ts>...>(std::forward<Ts>(comps)...)});
         }
 
     private:
-        std::vector<std::function<void(World&)>>& cmds_;
+        CommandArena& arena_;
     };
 
     DeferredProxy deferred() { return DeferredProxy{deferred_commands_}; }
@@ -207,8 +347,7 @@ public:
     void flush_deferred() {
         ECS_ASSERT(!iterating_, "flush during iteration");
         auto cmds = std::move(deferred_commands_);
-        for (auto& cmd : cmds)
-            cmd(*this);
+        cmds.execute_all(*this);
     }
 
     // -- Resources --
@@ -263,7 +402,7 @@ public:
     template <typename T>
     void on_add(std::function<void(World&, Entity, T&)> fn) {
         auto cid = component_id<std::decay_t<T>>();
-        on_add_hooks_[cid].push_back([fn = std::move(fn)](World& w, Entity e, void* ptr) {
+        add_hook(on_add_hooks_, cid, [fn = std::move(fn)](World& w, Entity e, void* ptr) {
             fn(w, e, *static_cast<T*>(ptr));
         });
     }
@@ -271,7 +410,7 @@ public:
     template <typename T>
     void on_remove(std::function<void(World&, Entity, T&)> fn) {
         auto cid = component_id<std::decay_t<T>>();
-        on_remove_hooks_[cid].push_back([fn = std::move(fn)](World& w, Entity e, void* ptr) {
+        add_hook(on_remove_hooks_, cid, [fn = std::move(fn)](World& w, Entity e, void* ptr) {
             fn(w, e, *static_cast<T*>(ptr));
         });
     }
@@ -534,23 +673,31 @@ private:
     std::unordered_map<TypeSet, std::unique_ptr<Archetype>, TypeSetHash> archetypes_;
     std::unordered_map<ComponentTypeID, ErasedResource> resources_;
     bool iterating_ = false;
-    std::vector<std::function<void(World&)>> deferred_commands_;
+    CommandArena deferred_commands_;
 
-    // -- Observer hooks --
-    std::unordered_map<ComponentTypeID, std::vector<std::function<void(World&, Entity, void*)>>>
-        on_add_hooks_;
-    std::unordered_map<ComponentTypeID, std::vector<std::function<void(World&, Entity, void*)>>>
-        on_remove_hooks_;
+    // -- Observer hooks (flat vector, sorted by CID for binary search) --
+    using HookFn = std::function<void(World&, Entity, void*)>;
+    struct HookEntry {
+        ComponentTypeID cid;
+        HookFn fn;
+    };
+    std::vector<HookEntry> on_add_hooks_;
+    std::vector<HookEntry> on_remove_hooks_;
 
-    void fire_hooks(
-        const std::unordered_map<ComponentTypeID,
-                                 std::vector<std::function<void(World&, Entity, void*)>>>& hooks,
-        ComponentTypeID cid, Entity e, void* data) {
-        auto it = hooks.find(cid);
-        if (it == hooks.end())
-            return;
-        for (auto& fn : it->second)
-            fn(*this, e, data);
+    static void add_hook(std::vector<HookEntry>& hooks, ComponentTypeID cid, HookFn fn) {
+        // Insert in sorted order by CID (stable: appends after existing hooks for same CID)
+        auto it = std::upper_bound(hooks.begin(), hooks.end(), cid,
+                                   [](ComponentTypeID c, const HookEntry& h) { return c < h.cid; });
+        hooks.insert(it, {cid, std::move(fn)});
+    }
+
+    void fire_hooks(const std::vector<HookEntry>& hooks, ComponentTypeID cid, Entity e,
+                    void* data) {
+        // Binary search for lower bound
+        auto lo = std::lower_bound(hooks.begin(), hooks.end(), cid,
+                                   [](const HookEntry& h, ComponentTypeID c) { return h.cid < c; });
+        for (auto it = lo; it != hooks.end() && it->cid == cid; ++it)
+            it->fn(*this, e, data);
     }
 
     // -- Query cache --

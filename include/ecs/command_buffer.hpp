@@ -2,49 +2,40 @@
 
 #include "world.hpp"
 
-#include <functional>
-#include <memory>
 #include <tuple>
-#include <vector>
 
 namespace ecs {
 
 class CommandBuffer {
 public:
-    void destroy(Entity e) {
-        commands_.push_back([e](World& w) { w.destroy(e); });
-    }
+    void destroy(Entity e) { arena_.emplace<World::DestroyCmd>(World::DestroyCmd{e}); }
 
     template <typename T>
     void add(Entity e, T&& comp) {
-        auto ptr = std::make_shared<std::decay_t<T>>(std::forward<T>(comp));
-        commands_.push_back([e, ptr](World& w) { w.add<std::decay_t<T>>(e, std::move(*ptr)); });
+        using U = std::decay_t<T>;
+        arena_.emplace<World::AddCmd<U>>(World::AddCmd<U>{e, std::forward<T>(comp)});
     }
 
     template <typename T>
     void remove(Entity e) {
-        commands_.push_back([e](World& w) { w.remove<std::decay_t<T>>(e); });
+        arena_.emplace<World::RemoveCmd<std::decay_t<T>>>(World::RemoveCmd<std::decay_t<T>>{e});
     }
 
     template <typename... Ts>
     void create_with(Ts&&... comps) {
-        auto data = std::make_shared<std::tuple<std::decay_t<Ts>...>>(std::forward<Ts>(comps)...);
-        commands_.push_back([data](World& w) {
-            std::apply([&w](auto&&... args) { w.create_with(std::move(args)...); },
-                       std::move(*data));
-        });
+        using Cmd = World::CreateWithCmd<std::decay_t<Ts>...>;
+        arena_.emplace<Cmd>(Cmd{std::tuple<std::decay_t<Ts>...>(std::forward<Ts>(comps)...)});
     }
 
     void flush(World& w) {
-        auto cmds = std::move(commands_);
-        for (auto& cmd : cmds)
-            cmd(w);
+        auto cmds = std::move(arena_);
+        cmds.execute_all(w);
     }
 
-    bool empty() const { return commands_.empty(); }
+    bool empty() const { return arena_.empty(); }
 
 private:
-    std::vector<std::function<void(World&)>> commands_;
+    World::CommandArena arena_;
 };
 
 } // namespace ecs
