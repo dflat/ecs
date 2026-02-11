@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.6.0
+**Version:** 0.7.1
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -23,7 +23,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 - Thread safety. All operations assume single-threaded access to a `World`.
 - Serialization. No built-in save/load.
 - ~~Reactive/event systems.~~ Basic observers implemented in Phase 4 — see §3.8.
-- Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. Optimization (e.g., bitset archetype matching, chunk allocation) is deferred.
+- Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. Optimization (e.g., chunk allocation) is deferred. ~~Bitset archetype matching~~ is implemented (Phase 7.1).
 - ~~Singleton resources.~~ Implemented in Phase 3 — see §3.7.
 
 ---
@@ -71,6 +71,7 @@ A unique combination of component types. Identified by a **TypeSet**: a sorted `
 Each archetype owns:
 - One **ComponentColumn** per component type (SoA storage).
 - A parallel `vector<Entity>` tracking which entity occupies each row.
+- A **component bitset** (`std::bitset<256>`) with one bit set per component type in the archetype, used for fast query matching.
 - An **edge cache** (`map<ComponentTypeID, ArchetypeEdge>`) for O(1) amortized archetype lookup when adding/removing components.
 
 **Invariant:** For every archetype, all columns and the entity vector have identical length (the archetype's entity count).
@@ -174,7 +175,7 @@ template <typename... Ts, typename... Ex, typename Func>
 void each(Exclude<Ex...>, Func&& fn);
 ```
 
-**Matching:** Queries use an internal cache keyed by `(include_types, exclude_types)`. The cache stores a `vector<Archetype*>` of matching archetypes and is invalidated when new archetypes are created (tracked via a generation counter). This makes repeated queries O(1) when the archetype set is stable.
+**Matching:** Queries use an internal cache keyed by `(include_types, exclude_types)`. The cache stores a `vector<Archetype*>` of matching archetypes and is invalidated when new archetypes are created (tracked via a generation counter). This makes repeated queries O(1) when the archetype set is stable. When the cache is invalidated, archetype matching uses bitwise AND+compare on a fixed-size `std::bitset<256>` per archetype (one bit per component type ID), avoiding per-component map lookups. This supports up to 256 distinct component types.
 
 **Iteration:** Within a matched archetype, retrieves typed pointers to each column's raw buffer and indexes linearly. This is the cache-friendly hot path — no indirection per entity.
 
@@ -383,10 +384,11 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Observers / hooks~~ — §3.8. Component lifecycle callbacks (`on_add`, `on_remove`).
 - ~~Automatic hierarchy consistency~~ — §5.2. Managed operations (`set_parent`, `remove_parent`, `destroy_recursive`).
 - ~~Archetype sorting~~ — §3.9. Sort entities within archetypes by a component comparator.
+- ~~Bitset archetype matching~~ — §3.5. Fixed-size bitset per archetype for fast query matching.
 
 ### 8.2 Long-Term
 
-- **Performance foundations.** Bitset archetype matching, chunk allocation for better memory patterns.
+- **Performance foundations.** Chunk allocation for better memory patterns.
 - **Parallel iteration.** Split archetype iteration across threads. Requires read/write access declarations per system and a dependency-aware scheduler.
 - **Serialization.** Stable type IDs (string-based or hash-based registration) and binary/JSON world snapshots.
 - **Scripting bridge.** Type-erased component access for dynamic languages (Python, Lua). Likely via string-keyed component lookup and void* accessors.

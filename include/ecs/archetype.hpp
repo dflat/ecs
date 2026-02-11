@@ -3,6 +3,7 @@
 #include "entity.hpp"
 
 #include <algorithm>
+#include <bitset>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +34,7 @@ struct ArchetypeEdge {
 
 struct Archetype {
     TypeSet type_set;
+    std::bitset<256> component_bits;
     std::map<ComponentTypeID, ComponentColumn> columns;
     std::vector<Entity> entities;
 

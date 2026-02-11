@@ -1026,6 +1026,47 @@ void test_sort_assert_during_iteration() {
     std::printf("  sort assert during iteration: OK\n");
 }
 
+// --- Phase 7.1: Bitset archetype matching ---
+
+struct F {};
+struct G {};
+struct H {};
+
+void test_bitset_many_archetypes() {
+    World w;
+    // Create entities across 6+ distinct archetypes with overlapping components
+    w.create_with(A{});
+    w.create_with(A{}, B{});
+    w.create_with(A{}, B{}, C{});
+    w.create_with(A{}, B{}, C{}, D{});
+    w.create_with(A{}, E{});
+    w.create_with(F{}, G{});
+    w.create_with(A{}, F{}, G{}, H{});
+    w.create_with(B{}, F{});
+
+    // Query for A — should match 6 entities across 6 archetypes
+    assert(w.count<A>() == 6);
+
+    // Query for A, B — should match 3 (A+B, A+B+C, A+B+C+D)
+    assert((w.count<A, B>() == 3));
+
+    // Query with exclude: A but not B — should match 3 (A alone, A+E, A+F+G+H)
+    int count = 0;
+    w.each<A>(World::Exclude<B>{}, [&](Entity, A&) { ++count; });
+    assert(count == 3);
+
+    // Query with exclude: A but not E and not F — should match 3 (A, A+B, A+B+C, A+B+C+D) minus
+    // none with E or F
+    count = 0;
+    w.each<A>(World::Exclude<E, F>{}, [&](Entity, A&) { ++count; });
+    assert(count == 4); // A, A+B, A+B+C, A+B+C+D
+
+    // Query for F, G — should match 2 (F+G, A+F+G+H)
+    assert((w.count<F, G>() == 2));
+
+    std::printf("  bitset many archetypes: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -1096,6 +1137,8 @@ int main() {
     test_sort_equal_keys();
     test_sort_multiple_archetypes();
     test_sort_assert_during_iteration();
+    std::printf("  -- Phase 7.1 --\n");
+    test_bitset_many_archetypes();
     std::printf("All tests passed!\n");
     return 0;
 }

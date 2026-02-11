@@ -576,8 +576,13 @@ private:
         auto& entry = query_cache_[key];
         if (entry.generation != archetype_generation_) {
             entry.archetypes.clear();
+            std::bitset<256> include_mask, exclude_mask;
+            for (size_t i = 0; i < n_include; ++i)
+                include_mask.set(include[i]);
+            for (size_t i = 0; i < n_exclude; ++i)
+                exclude_mask.set(exclude[i]);
             for (auto& [ts, arch] : archetypes_) {
-                if (archetype_matches(arch.get(), include, n_include, exclude, n_exclude))
+                if (archetype_matches(arch->component_bits, include_mask, exclude_mask))
                     entry.archetypes.push_back(arch.get());
             }
             entry.generation = archetype_generation_;
@@ -585,17 +590,10 @@ private:
         return entry.archetypes;
     }
 
-    static bool archetype_matches(Archetype* arch, const ComponentTypeID* include, size_t n_include,
-                                  const ComponentTypeID* exclude, size_t n_exclude) {
-        for (size_t i = 0; i < n_include; ++i) {
-            if (!arch->has_component(include[i]))
-                return false;
-        }
-        for (size_t i = 0; i < n_exclude; ++i) {
-            if (arch->has_component(exclude[i]))
-                return false;
-        }
-        return true;
+    static bool archetype_matches(const std::bitset<256>& arch_bits,
+                                  const std::bitset<256>& include_mask,
+                                  const std::bitset<256>& exclude_mask) {
+        return (arch_bits & include_mask) == include_mask && (arch_bits & exclude_mask).none();
     }
 
     Archetype* get_or_create_archetype(const TypeSet& ts) {
@@ -608,6 +606,7 @@ private:
         auto& factory_reg = column_factory_registry();
         for (auto cid : ts) {
             arch->columns.emplace(cid, factory_reg.at(cid)());
+            arch->component_bits.set(cid);
         }
         Archetype* ptr = arch.get();
         archetypes_.emplace(ts, std::move(arch));

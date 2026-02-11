@@ -43,7 +43,7 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 6.1 Sort entities within an archetype
 
 ### Phase 7 — Performance Foundations
-- [ ] 7.1 Bitset archetype matching
+- [x] 7.1 Bitset archetype matching
 - [ ] 7.2 Chunk allocation
 
 ### Phase 8 — Serialization
