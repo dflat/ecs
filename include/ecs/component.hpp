@@ -34,6 +34,7 @@ struct ComponentColumn {
     size_t elem_size = 0;
     size_t count = 0;
     size_t capacity = 0;
+    size_t alignment = 1;
 
     using MoveFunc = void (*)(void* dst, void* src);
     using DestroyFunc = void (*)(void* ptr);
@@ -50,6 +51,7 @@ struct ComponentColumn {
           elem_size(o.elem_size),
           count(o.count),
           capacity(o.capacity),
+          alignment(o.alignment),
           move_fn(o.move_fn),
           destroy_fn(o.destroy_fn),
           swap_fn(o.swap_fn) {
@@ -61,11 +63,12 @@ struct ComponentColumn {
     ComponentColumn& operator=(ComponentColumn&& o) noexcept {
         if (this != &o) {
             destroy_all();
-            std::free(data);
+            // data is owned by Archetype's block_ — do NOT free here
             data = o.data;
             elem_size = o.elem_size;
             count = o.count;
             capacity = o.capacity;
+            alignment = o.alignment;
             move_fn = o.move_fn;
             destroy_fn = o.destroy_fn;
             swap_fn = o.swap_fn;
@@ -78,27 +81,14 @@ struct ComponentColumn {
 
     ~ComponentColumn() {
         destroy_all();
-        std::free(data);
+        // data is owned by Archetype's block_ — do NOT free here
     }
 
     ComponentColumn(const ComponentColumn&) = delete;
     ComponentColumn& operator=(const ComponentColumn&) = delete;
 
-    void grow() {
-        size_t new_cap = capacity == 0 ? 16 : capacity * 2;
-        uint8_t* new_data = static_cast<uint8_t*>(std::malloc(new_cap * elem_size));
-        if (data) {
-            for (size_t i = 0; i < count; ++i)
-                move_fn(new_data + i * elem_size, data + i * elem_size);
-            std::free(data);
-        }
-        data = new_data;
-        capacity = new_cap;
-    }
-
     void push_raw(void* src) {
-        if (count == capacity)
-            grow();
+        ECS_ASSERT(count < capacity, "push_raw: column at capacity (archetype should have grown)");
         move_fn(data + count * elem_size, src);
         ++count;
     }
@@ -128,6 +118,7 @@ template <typename T>
 ComponentColumn make_column() {
     ComponentColumn col;
     col.elem_size = sizeof(T);
+    col.alignment = alignof(T);
     col.move_fn = [](void* dst, void* src) {
         new (dst) T(std::move(*static_cast<T*>(src)));
         static_cast<T*>(src)->~T();

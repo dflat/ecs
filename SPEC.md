@@ -23,7 +23,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 - Thread safety. All operations assume single-threaded access to a `World`.
 - Serialization. No built-in save/load.
 - ~~Reactive/event systems.~~ Basic observers implemented in Phase 4 — see §3.8.
-- Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. Optimization (e.g., chunk allocation) is deferred. ~~Bitset archetype matching~~ is implemented (Phase 7.1).
+- Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. ~~Bitset archetype matching~~ is implemented (Phase 7.1). ~~Chunk allocation~~ is implemented (Phase 7.2).
 - ~~Singleton resources.~~ Implemented in Phase 3 — see §3.7.
 
 ---
@@ -78,16 +78,32 @@ Each archetype owns:
 
 ### 2.4 ComponentColumn (Type-Erased Storage)
 
-A dynamically-sized array for a single component type within an archetype.
+A non-owning view into a region of the archetype's chunk-allocated block. Each column stores elements of a single component type contiguously.
 
 | Property | Value |
 |---|---|
-| Backing memory | `malloc`/`free`, `uint8_t*` buffer |
+| Backing memory | Non-owning `uint8_t*` into archetype's block (see §2.3.1) |
 | Element lifecycle | Placement-new via move constructor; explicit destructor calls |
-| Growth policy | 2x capacity, initial capacity 16 |
+| Growth policy | Managed by archetype (see §2.3.1) |
 | Deletion policy | Swap-remove: last element is move-constructed over the deleted slot, maintaining density |
 
-**Function pointers** (`MoveFunc`, `DestroyFunc`) are captured at column creation from the concrete type via `make_column<T>()`. This allows type-erased operations without virtual dispatch.
+**Function pointers** (`MoveFunc`, `DestroyFunc`, `SwapFunc`) are captured at column creation from the concrete type via `make_column<T>()`. This allows type-erased operations without virtual dispatch.
+
+#### 2.3.1 Chunk Allocation
+
+Each archetype owns a single contiguous memory block containing all column data (SoA layout). Column regions are separated by 16-byte alignment padding:
+
+```
+block: [Col0: cap * elem0] [pad16] [Col1: cap * elem1] [pad16] ...
+```
+
+| Property | Value |
+|---|---|
+| Initial capacity | `max(16, 16384 / row_size)` where `row_size = sum(elem_sizes)` |
+| Growth policy | 2x doubling of the entire block |
+| Allocator calls per grow | 1 (vs N per column previously) |
+
+The `entities` vector remains a separate `std::vector`.
 
 **Column Factory Registry:**
 A global `map<ComponentTypeID, function<ComponentColumn()>>` is populated by `ensure_column_factory<T>()` on first use of each type. This allows new archetypes to be constructed during migration without compile-time knowledge of the component type at the migration call site.

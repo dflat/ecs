@@ -652,6 +652,7 @@ private:
     // Migrate entity from old_arch[old_row] to new_arch, moving all shared columns.
     // Does NOT handle the added component — caller pushes it after.
     void migrate_entity(Entity e, Archetype* old_arch, Archetype* new_arch, size_t old_row) {
+        new_arch->ensure_capacity(new_arch->count() + 1);
         // Move shared column data to new archetype
         for (auto& [cid, new_col] : new_arch->columns) {
             auto it = old_arch->columns.find(cid);
@@ -676,6 +677,7 @@ private:
     // Migrate removing a component: moves all columns except cid_to_remove.
     void migrate_entity_removing(Entity e, Archetype* old_arch, Archetype* new_arch, size_t old_row,
                                  ComponentTypeID /*cid_to_remove*/) {
+        new_arch->ensure_capacity(new_arch->count() + 1);
         // Move shared column data (all except the removed one)
         for (auto& [cid, new_col] : new_arch->columns) {
             auto it = old_arch->columns.find(cid);

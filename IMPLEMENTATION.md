@@ -44,7 +44,7 @@ earlier ones. Items across phases are independent unless noted.
 
 ### Phase 7 — Performance Foundations
 - [x] 7.1 Bitset archetype matching
-- [ ] 7.2 Chunk allocation
+- [x] 7.2 Chunk allocation
 
 ### Phase 8 — Serialization
 - [ ] 8.1 Stable type registration
