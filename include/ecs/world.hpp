@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <iosfwd>
 #include <memory>
 #include <numeric>
 #include <unordered_map>
@@ -497,6 +498,9 @@ public:
             }
         }
     }
+
+    friend void serialize(const World& world, std::ostream& out);
+    friend void deserialize(World& world, std::istream& in);
 
 private:
     struct ErasedResource {

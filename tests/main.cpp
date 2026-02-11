@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <ecs/ecs.hpp>
 #include <memory>
+#include <sstream>
 #include <string>
 
 using namespace ecs;
@@ -1067,6 +1068,184 @@ void test_bitset_many_archetypes() {
     std::printf("  bitset many archetypes: OK\n");
 }
 
+// --- Phase 8.1: Stable Type Registration ---
+
+void test_register_component_lookup() {
+    register_component<Position>("Position");
+    register_component<Velocity>("Velocity");
+
+    assert(component_id_by_name("Position") == component_id<Position>());
+    assert(component_id_by_name("Velocity") == component_id<Velocity>());
+    assert(component_name(component_id<Position>()) == "Position");
+    assert(component_name(component_id<Velocity>()) == "Velocity");
+    assert(component_registered(component_id<Position>()));
+    assert(component_registered(component_id<Velocity>()));
+    std::printf("  register component lookup: OK\n");
+}
+
+void test_register_component_idempotent() {
+    register_component<Position>("Position");
+    register_component<Position>("Position"); // same name, same type — no-op
+    assert(component_id_by_name("Position") == component_id<Position>());
+    std::printf("  register component idempotent: OK\n");
+}
+
+void test_register_component_conflict() {
+    auto old_handler = signal(SIGABRT, abort_handler);
+    bool caught = false;
+    if (sigsetjmp(jump_buf, 1) == 0) {
+        register_component<Health>("Position"); // different type, same name as Position
+    } else {
+        caught = true;
+    }
+    signal(SIGABRT, old_handler);
+    assert(caught);
+    std::printf("  register component conflict: OK\n");
+}
+
+// --- Phase 8.2: Serialization ---
+
+void test_serialize_round_trip() {
+    register_component<Position>("Position");
+    register_component<Velocity>("Velocity");
+    register_component<Health>("Health");
+
+    World w1;
+    Entity e1 = w1.create_with(Position{1.0f, 2.0f}, Velocity{3.0f, 4.0f});
+    Entity e2 = w1.create_with(Position{5.0f, 6.0f}, Health{100});
+    Entity e3 = w1.create_with(Health{50});
+
+    std::stringstream ss;
+    serialize(w1, ss);
+
+    World w2;
+    deserialize(w2, ss);
+
+    assert(w2.alive(e1));
+    assert(w2.alive(e2));
+    assert(w2.alive(e3));
+    assert(w2.get<Position>(e1).x == 1.0f && w2.get<Position>(e1).y == 2.0f);
+    assert(w2.get<Velocity>(e1).dx == 3.0f && w2.get<Velocity>(e1).dy == 4.0f);
+    assert(w2.get<Position>(e2).x == 5.0f && w2.get<Position>(e2).y == 6.0f);
+    assert(w2.get<Health>(e2).hp == 100);
+    assert(w2.get<Health>(e3).hp == 50);
+    assert(!w2.has<Velocity>(e2));
+    assert(!w2.has<Position>(e3));
+    assert(w2.count() == 3);
+    std::printf("  serialize round trip: OK\n");
+}
+
+void test_serialize_destroyed_entities() {
+    register_component<Position>("Position");
+
+    World w1;
+    Entity e1 = w1.create_with(Position{1.0f, 0.0f});
+    Entity e2 = w1.create_with(Position{2.0f, 0.0f});
+    Entity e3 = w1.create_with(Position{3.0f, 0.0f});
+    w1.destroy(e2); // free list should contain e2's index
+
+    std::stringstream ss;
+    serialize(w1, ss);
+
+    World w2;
+    deserialize(w2, ss);
+
+    assert(w2.alive(e1));
+    assert(!w2.alive(e2)); // destroyed
+    assert(w2.alive(e3));
+    assert(w2.get<Position>(e1).x == 1.0f);
+    assert(w2.get<Position>(e3).x == 3.0f);
+    assert(w2.count() == 2);
+
+    // New entity should reuse the free slot
+    Entity e4 = w2.create();
+    assert(e4.index == e2.index);
+    assert(e4.generation == e2.generation + 1);
+    std::printf("  serialize destroyed entities: OK\n");
+}
+
+void test_serialize_empty_world() {
+    World w1;
+
+    std::stringstream ss;
+    serialize(w1, ss);
+
+    World w2;
+    deserialize(w2, ss);
+
+    assert(w2.count() == 0);
+    std::printf("  serialize empty world: OK\n");
+}
+
+void test_serialize_with_hierarchy() {
+    register_component<Parent>("Parent");
+    register_component<Children>(
+        "Children",
+        // Custom serialize for Children (non-trivially-copyable)
+        [](const void* elem, std::ostream& out) {
+            auto& children = *static_cast<const Children*>(elem);
+            uint32_t count = static_cast<uint32_t>(children.entities.size());
+            out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            for (auto& e : children.entities) {
+                out.write(reinterpret_cast<const char*>(&e.index), sizeof(uint32_t));
+                out.write(reinterpret_cast<const char*>(&e.generation), sizeof(uint32_t));
+            }
+        },
+        [](void* elem, std::istream& in) {
+            auto& children = *static_cast<Children*>(elem);
+            uint32_t count;
+            in.read(reinterpret_cast<char*>(&count), sizeof(count));
+            children.entities.resize(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                in.read(reinterpret_cast<char*>(&children.entities[i].index), sizeof(uint32_t));
+                in.read(reinterpret_cast<char*>(&children.entities[i].generation),
+                        sizeof(uint32_t));
+            }
+        });
+
+    World w1;
+    Entity parent = w1.create_with(Position{10.0f, 0.0f});
+    Entity child = w1.create_with(Position{0.0f, 5.0f});
+    set_parent(w1, child, parent);
+
+    std::stringstream ss;
+    serialize(w1, ss);
+
+    World w2;
+    deserialize(w2, ss);
+
+    assert(w2.alive(parent));
+    assert(w2.alive(child));
+    assert(w2.has<Parent>(child));
+    assert(w2.get<Parent>(child).entity == parent);
+    assert(w2.has<Children>(parent));
+    assert(w2.get<Children>(parent).entities.size() == 1);
+    assert(w2.get<Children>(parent).entities[0] == child);
+    std::printf("  serialize with hierarchy: OK\n");
+}
+
+void test_serialize_unregistered_type_asserts() {
+    // Use a type that is NOT registered
+    struct Unregistered {
+        int val;
+    };
+
+    World w;
+    w.create_with(Unregistered{42});
+
+    auto old_handler = signal(SIGABRT, abort_handler);
+    bool caught = false;
+    if (sigsetjmp(jump_buf, 1) == 0) {
+        std::stringstream ss;
+        serialize(w, ss);
+    } else {
+        caught = true;
+    }
+    signal(SIGABRT, old_handler);
+    assert(caught);
+    std::printf("  serialize unregistered type asserts: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -1139,6 +1318,16 @@ int main() {
     test_sort_assert_during_iteration();
     std::printf("  -- Phase 7.1 --\n");
     test_bitset_many_archetypes();
+    std::printf("  -- Phase 8.1 --\n");
+    test_register_component_lookup();
+    test_register_component_idempotent();
+    test_register_component_conflict();
+    std::printf("  -- Phase 8.2 --\n");
+    test_serialize_round_trip();
+    test_serialize_destroyed_entities();
+    test_serialize_empty_world();
+    test_serialize_with_hierarchy();
+    test_serialize_unregistered_type_asserts();
     std::printf("All tests passed!\n");
     return 0;
 }

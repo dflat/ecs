@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.7.1
+**Version:** 0.8
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -21,7 +21,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 ### 1.2 Non-Goals (Current Scope)
 
 - Thread safety. All operations assume single-threaded access to a `World`.
-- Serialization. No built-in save/load.
+- ~~Serialization.~~ Binary world snapshots implemented in Phase 8 — see §3.10.
 - ~~Reactive/event systems.~~ Basic observers implemented in Phase 4 — see §3.8.
 - Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. ~~Bitset archetype matching~~ is implemented (Phase 7.1). ~~Chunk allocation~~ is implemented (Phase 7.2).
 - ~~Singleton resources.~~ Implemented in Phase 3 — see §3.7.
@@ -62,7 +62,7 @@ template <typename T>
 ComponentTypeID component_id();
 ```
 
-Returns a unique `uint32_t` for each type `T`, assigned on first call via a static counter. Deterministic within a single program execution but not stable across builds or translation units that vary call order. (Type IDs are not suitable for serialization keys.)
+Returns a unique `uint32_t` for each type `T`, assigned on first call via a static counter. Deterministic within a single program execution but not stable across builds or translation units that vary call order. For serialization, use `register_component<T>(name)` to assign stable string names (see §3.10).
 
 ### 2.3 Archetype
 
@@ -296,6 +296,42 @@ This is a batch operation — sort order is not maintained incrementally. Call i
 
 **Algorithm:** For each matching archetype, builds an index array sorted by the comparator, then applies the resulting permutation via in-place cycle-chasing swaps. Column element swaps use a type-erased `SwapFunc` stored on each `ComponentColumn`.
 
+### 3.10 Serialization
+
+**Type Registration:**
+
+```cpp
+template <typename T>
+void register_component(const char* name,
+                        ComponentColumn::SerializeFunc ser = nullptr,
+                        ComponentColumn::DeserializeFunc deser = nullptr);
+```
+
+Registers a component type with a stable string name for serialization. The name must be unique across all registered types (asserts on conflict). Double-registration with the same name and type is idempotent.
+
+For trivially copyable types, serialize/deserialize functions are auto-generated (memcpy-based) if not provided. For non-trivially-copyable types (e.g., `Children` with `std::vector<Entity>`), explicit serialize/deserialize functions must be provided.
+
+**Lookup helpers:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `component_id_by_name` | `ComponentTypeID component_id_by_name(const std::string& name)` | Look up ID by name. Asserts if not found. |
+| `component_name` | `const std::string& component_name(ComponentTypeID id)` | Look up name by ID. Asserts if not found. |
+| `component_registered` | `bool component_registered(ComponentTypeID id)` | Check if a type ID has been registered. |
+
+**World Snapshot:**
+
+```cpp
+void serialize(const World& world, std::ostream& out);
+void deserialize(World& world, std::istream& in);
+```
+
+Binary serialization of the entire world state. All component types present in the world must be registered (asserts otherwise). The target world for `deserialize` must be empty (asserts otherwise).
+
+**Binary format:** Header (magic `"ECS\0"`, version, archetype count, entity slot count) followed by per-archetype blocks (component names, element sizes, serialized column data, entity list) and an entity table (generations, free list).
+
+Round-trip preserves: all entities (alive and destroyed), component data, archetype structure, generation counters, and free list. Resources, observers, and deferred commands are not serialized.
+
 ---
 
 ## 4. System Registry
@@ -376,7 +412,7 @@ These are accepted constraints of the current implementation, not bugs.
 
 1. **Not thread-safe.** No synchronization on any data structure. A single World must be accessed from one thread at a time.
 2. **No structural changes during iteration.** `each()` holds raw pointers into column buffers. Direct structural changes during a callback trigger a debug assertion. Use `world.deferred()` to queue changes safely (see §3.6).
-3. **Component type IDs are not stable across builds.** IDs are assigned by call order, which can vary with compiler, link order, or code changes. Cannot be used as serialization keys.
+3. **Component type IDs are not stable across builds.** IDs are assigned by call order, which can vary with compiler, link order, or code changes. Use `register_component<T>(name)` to assign stable string names for serialization (see §3.10).
 4. **Global column factory registry.** The factory map is a process-wide singleton. Multiple `World` instances share it (harmless in practice, but not isolated).
 5. **Migration cost.** Adding/removing a component moves all of an entity's components to a new archetype. Frequent single-component changes on entities with many components are expensive.
 6. **Hierarchy consistency requires helper functions.** Use `set_parent`, `remove_parent`, and `destroy_recursive` (from `builtin/hierarchy_ops.hpp`) for automatic bidirectional consistency. Direct manipulation of `Parent` and `Children` is possible but the application must keep both sides in sync.
@@ -401,12 +437,11 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Automatic hierarchy consistency~~ — §5.2. Managed operations (`set_parent`, `remove_parent`, `destroy_recursive`).
 - ~~Archetype sorting~~ — §3.9. Sort entities within archetypes by a component comparator.
 - ~~Bitset archetype matching~~ — §3.5. Fixed-size bitset per archetype for fast query matching.
+- ~~Serialization~~ — §3.10. Stable type registration and binary world snapshots.
 
 ### 8.2 Long-Term
 
-- **Performance foundations.** Chunk allocation for better memory patterns.
 - **Parallel iteration.** Split archetype iteration across threads. Requires read/write access declarations per system and a dependency-aware scheduler.
-- **Serialization.** Stable type IDs (string-based or hash-based registration) and binary/JSON world snapshots.
 - **Scripting bridge.** Type-erased component access for dynamic languages (Python, Lua). Likely via string-keyed component lookup and void* accessors.
 - **Prefabs / templates.** Define archetype templates for batch entity creation with shared defaults.
 
@@ -426,6 +461,7 @@ ecs/
 │   ├── component.hpp                           ComponentTypeID, component_id<T>(), ComponentColumn, column factory
 │   ├── archetype.hpp                           TypeSet, TypeSetHash, Archetype, ArchetypeEdge
 │   ├── world.hpp                               World (main API), EntityRecord, DeferredProxy, query cache
+│   ├── serialization.hpp                       serialize(), deserialize() (binary world snapshots)
 │   ├── command_buffer.hpp                      CommandBuffer (standalone deferred command queue)
 │   ├── system.hpp                              SystemRegistry (auto-flushes deferred commands)
 │   └── builtin/

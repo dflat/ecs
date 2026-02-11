@@ -47,8 +47,8 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 7.2 Chunk allocation
 
 ### Phase 8 — Serialization
-- [ ] 8.1 Stable type registration
-- [ ] 8.2 World snapshot (binary)
+- [x] 8.1 Stable type registration
+- [x] 8.2 World snapshot (binary)
 
 ### Phase 9 — Scripting Bridge
 - [ ] 9.1 Type-erased component access
