@@ -139,6 +139,8 @@ struct Archetype {
 
         size_t total = block_size_for(new_cap);
         uint8_t* new_block = static_cast<uint8_t*>(std::malloc(total));
+        if (!new_block)
+            throw std::bad_alloc();
 
         size_t offset = 0;
         for (auto& [cid, col] : columns) {
