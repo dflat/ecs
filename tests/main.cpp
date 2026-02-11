@@ -886,6 +886,146 @@ void test_hierarchy_propagation_with_set_parent() {
     std::printf("  hierarchy propagation with set_parent: OK\n");
 }
 
+// --- Phase 6: Sorting ---
+
+struct Depth {
+    float z;
+};
+
+void test_sort_basic_order() {
+    World w;
+    Entity e1 = w.create_with(Depth{3.0f});
+    Entity e2 = w.create_with(Depth{1.0f});
+    Entity e3 = w.create_with(Depth{2.0f});
+
+    w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+
+    // Verify iteration order is sorted
+    std::vector<float> order;
+    w.each<Depth>([&](Entity, Depth& d) { order.push_back(d.z); });
+    assert(order.size() == 3);
+    assert(order[0] == 1.0f);
+    assert(order[1] == 2.0f);
+    assert(order[2] == 3.0f);
+
+    // Verify get still works via entity handles
+    assert(w.get<Depth>(e1).z == 3.0f);
+    assert(w.get<Depth>(e2).z == 1.0f);
+    assert(w.get<Depth>(e3).z == 2.0f);
+    std::printf("  sort basic order: OK\n");
+}
+
+void test_sort_multi_column() {
+    World w;
+    Entity e1 = w.create_with(Depth{3.0f}, Position{30, 0});
+    Entity e2 = w.create_with(Depth{1.0f}, Position{10, 0});
+    Entity e3 = w.create_with(Depth{2.0f}, Position{20, 0});
+
+    w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+
+    // Both columns should be rearranged in lockstep
+    std::vector<float> depths;
+    std::vector<float> positions;
+    w.each<Depth, Position>([&](Entity, Depth& d, Position& p) {
+        depths.push_back(d.z);
+        positions.push_back(p.x);
+    });
+    assert(depths[0] == 1.0f && positions[0] == 10.0f);
+    assert(depths[1] == 2.0f && positions[1] == 20.0f);
+    assert(depths[2] == 3.0f && positions[2] == 30.0f);
+
+    // Entity handles still work
+    assert(w.get<Position>(e1).x == 30.0f);
+    assert(w.get<Position>(e2).x == 10.0f);
+    assert(w.get<Position>(e3).x == 20.0f);
+    std::printf("  sort multi column: OK\n");
+}
+
+void test_sort_single_entity() {
+    World w;
+    Entity e = w.create_with(Depth{5.0f});
+    w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+    assert(w.get<Depth>(e).z == 5.0f);
+    std::printf("  sort single entity: OK\n");
+}
+
+void test_sort_empty_archetype() {
+    World w;
+    // Create and destroy to leave an empty archetype with Depth
+    Entity e = w.create_with(Depth{1.0f});
+    w.destroy(e);
+    w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+    // No crash
+    std::printf("  sort empty archetype: OK\n");
+}
+
+void test_sort_equal_keys() {
+    World w;
+    w.create_with(Depth{2.0f}, Position{1, 0});
+    w.create_with(Depth{2.0f}, Position{2, 0});
+    w.create_with(Depth{2.0f}, Position{3, 0});
+
+    w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+
+    // All depths should still be 2.0, no corruption
+    int count = 0;
+    w.each<Depth, Position>([&](Entity, Depth& d, Position&) {
+        assert(d.z == 2.0f);
+        ++count;
+    });
+    assert(count == 3);
+    std::printf("  sort equal keys: OK\n");
+}
+
+void test_sort_multiple_archetypes() {
+    World w;
+    // Depth-only archetype
+    Entity e1 = w.create_with(Depth{3.0f});
+    Entity e2 = w.create_with(Depth{1.0f});
+    // Depth+Position archetype
+    Entity e3 = w.create_with(Depth{4.0f}, Position{40, 0});
+    Entity e4 = w.create_with(Depth{2.0f}, Position{20, 0});
+
+    w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+
+    // Depth-only archetype should be sorted
+    assert(w.get<Depth>(e1).z == 3.0f);
+    assert(w.get<Depth>(e2).z == 1.0f);
+    // Depth+Position archetype should be sorted
+    assert(w.get<Depth>(e3).z == 4.0f);
+    assert(w.get<Depth>(e4).z == 2.0f);
+
+    // Verify iteration order within each archetype
+    std::vector<float> depth_only;
+    w.each<Depth>(World::Exclude<Position>{}, [&](Entity, Depth& d) { depth_only.push_back(d.z); });
+    assert(depth_only[0] == 1.0f);
+    assert(depth_only[1] == 3.0f);
+
+    std::vector<float> depth_pos;
+    w.each<Depth, Position>([&](Entity, Depth& d, Position&) { depth_pos.push_back(d.z); });
+    assert(depth_pos[0] == 2.0f);
+    assert(depth_pos[1] == 4.0f);
+    std::printf("  sort multiple archetypes: OK\n");
+}
+
+void test_sort_assert_during_iteration() {
+    World w;
+    w.create_with(Depth{1.0f});
+
+    auto old_handler = signal(SIGABRT, abort_handler);
+    bool caught = false;
+    if (sigsetjmp(jump_buf, 1) == 0) {
+        w.each<Depth>([&](Entity, Depth&) {
+            w.sort<Depth>([](const Depth& a, const Depth& b) { return a.z < b.z; });
+        });
+    } else {
+        caught = true;
+    }
+    signal(SIGABRT, old_handler);
+    assert(caught);
+    std::printf("  sort assert during iteration: OK\n");
+}
+
 int main() {
     std::printf("Running ECS tests...\n");
     test_create_destroy();
@@ -948,6 +1088,14 @@ int main() {
     test_destroy_recursive_leaf();
     test_set_parent_creates_children();
     test_hierarchy_propagation_with_set_parent();
+    std::printf("  -- Phase 6 --\n");
+    test_sort_basic_order();
+    test_sort_multi_column();
+    test_sort_single_entity();
+    test_sort_empty_archetype();
+    test_sort_equal_keys();
+    test_sort_multiple_archetypes();
+    test_sort_assert_during_iteration();
     std::printf("All tests passed!\n");
     return 0;
 }

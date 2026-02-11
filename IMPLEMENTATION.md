@@ -40,7 +40,7 @@ earlier ones. Items across phases are independent unless noted.
 - [x] 5.2 Refactor transform propagation
 
 ### Phase 6 — Archetype Sorting
-- [ ] 6.1 Sort entities within an archetype
+- [x] 6.1 Sort entities within an archetype
 
 ### Phase 7 — Performance Foundations
 - [ ] 7.1 Bitset archetype matching

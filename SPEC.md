@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.5.0
+**Version:** 0.6.0
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -264,6 +264,21 @@ void on_remove(std::function<void(World&, Entity, T&)> fn);
 - `create_with<A, B, C>()`: `on_add` fires per component in template pack order.
 - `destroy()`: `on_remove` fires per component in archetype column iteration order (unspecified).
 
+### 3.9 Archetype Sorting
+
+```cpp
+template <typename T, typename Compare>
+void sort(Compare&& cmp);
+```
+
+Sorts all archetypes that contain component `T` by applying `cmp` to pairs of `const T&`. All columns in each matching archetype are rearranged in lockstep, and `EntityRecord::row` is updated for every affected entity.
+
+This is a batch operation — sort order is not maintained incrementally. Call it once per frame where ordering matters (e.g., rendering by depth).
+
+**Precondition:** Not called during iteration (asserts `!iterating_`).
+
+**Algorithm:** For each matching archetype, builds an index array sorted by the comparator, then applies the resulting permutation via in-place cycle-chasing swaps. Column element swaps use a type-erased `SwapFunc` stored on each `ComponentColumn`.
+
 ---
 
 ## 4. System Registry
@@ -367,12 +382,9 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Singleton resources~~ — §3.7. Typed global data on World, independent of entities.
 - ~~Observers / hooks~~ — §3.8. Component lifecycle callbacks (`on_add`, `on_remove`).
 - ~~Automatic hierarchy consistency~~ — §5.2. Managed operations (`set_parent`, `remove_parent`, `destroy_recursive`).
+- ~~Archetype sorting~~ — §3.9. Sort entities within archetypes by a component comparator.
 
-### 8.2 Mid-Term
-
-- **Sorting within archetypes.** Allow sorting an archetype's entities by a component field for spatial or rendering order.
-
-### 8.3 Long-Term
+### 8.2 Long-Term
 
 - **Performance foundations.** Bitset archetype matching, chunk allocation for better memory patterns.
 - **Parallel iteration.** Split archetype iteration across threads. Requires read/write access declarations per system and a dependency-aware scheduler.

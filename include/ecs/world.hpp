@@ -3,9 +3,11 @@
 #include "component.hpp"
 #include "entity.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <unordered_map>
 #include <vector>
 
@@ -440,6 +442,59 @@ public:
                 static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
             for (size_t i = 0; i < n; ++i)
                 fn(std::get<Ts*>(ptrs)[i]...);
+        }
+    }
+
+    // -- Sorting --
+
+    template <typename T, typename Compare>
+    void sort(Compare&& cmp) {
+        ECS_ASSERT(!iterating_, "sort during iteration");
+        ComponentTypeID cid = component_id<T>();
+
+        for (auto& [ts, arch] : archetypes_) {
+            if (!arch->has_component(cid))
+                continue;
+            size_t n = arch->count();
+            if (n <= 1)
+                continue;
+
+            // Build index array
+            std::vector<size_t> perm(n);
+            std::iota(perm.begin(), perm.end(), size_t(0));
+
+            // Sort indices by comparing T column elements
+            auto& sort_col = arch->columns.at(cid);
+            uint8_t* sort_data = sort_col.data;
+            size_t sort_elem = sort_col.elem_size;
+            std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+                return cmp(*static_cast<T*>(static_cast<void*>(sort_data + a * sort_elem)),
+                           *static_cast<T*>(static_cast<void*>(sort_data + b * sort_elem)));
+            });
+
+            // Invert the gather permutation to get a scatter permutation
+            // perm[i] = "source index for destination i" (gather)
+            // inv[i] = "destination index for source i" (scatter)
+            std::vector<size_t> inv(n);
+            for (size_t i = 0; i < n; ++i)
+                inv[perm[i]] = i;
+
+            // Apply scatter permutation via cycle-chasing swaps
+            for (size_t i = 0; i < n; ++i) {
+                while (inv[i] != i) {
+                    size_t j = inv[i];
+                    std::swap(arch->entities[i], arch->entities[j]);
+                    for (auto& [col_id, col] : arch->columns) {
+                        col.swap_fn(col.get(i), col.get(j));
+                    }
+                    std::swap(inv[i], inv[j]);
+                }
+            }
+
+            // Update entity records
+            for (size_t i = 0; i < n; ++i) {
+                records_[arch->entities[i].index].row = i;
+            }
         }
     }
 

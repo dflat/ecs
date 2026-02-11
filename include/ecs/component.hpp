@@ -37,9 +37,11 @@ struct ComponentColumn {
 
     using MoveFunc = void (*)(void* dst, void* src);
     using DestroyFunc = void (*)(void* ptr);
+    using SwapFunc = void (*)(void* a, void* b);
 
     MoveFunc move_fn = nullptr;
     DestroyFunc destroy_fn = nullptr;
+    SwapFunc swap_fn = nullptr;
 
     ComponentColumn() = default;
 
@@ -49,7 +51,8 @@ struct ComponentColumn {
           count(o.count),
           capacity(o.capacity),
           move_fn(o.move_fn),
-          destroy_fn(o.destroy_fn) {
+          destroy_fn(o.destroy_fn),
+          swap_fn(o.swap_fn) {
         o.data = nullptr;
         o.count = 0;
         o.capacity = 0;
@@ -65,6 +68,7 @@ struct ComponentColumn {
             capacity = o.capacity;
             move_fn = o.move_fn;
             destroy_fn = o.destroy_fn;
+            swap_fn = o.swap_fn;
             o.data = nullptr;
             o.count = 0;
             o.capacity = 0;
@@ -130,6 +134,10 @@ ComponentColumn make_column() {
     };
     col.destroy_fn = [](void* ptr) {
         static_cast<T*>(ptr)->~T();
+    };
+    col.swap_fn = [](void* a, void* b) {
+        using std::swap;
+        swap(*static_cast<T*>(a), *static_cast<T*>(b));
     };
     return col;
 }
