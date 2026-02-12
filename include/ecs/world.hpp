@@ -3,6 +3,7 @@
 #include "command_buffer.hpp"
 #include "component.hpp"
 #include "entity.hpp"
+#include "prefab.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -468,6 +469,9 @@ public:
     friend void serialize(const World& world, std::ostream& out);
     friend void deserialize(World& world, std::istream& in);
     friend class CommandBuffer;
+    friend Entity instantiate(World& world, const Prefab& prefab);
+    template <typename... Overrides>
+    friend Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides);
 
 private:
     struct ErasedResource {
@@ -825,6 +829,142 @@ inline void CommandBuffer::flush(World& w) {
         }
         }
     }
+}
+
+// -- Prefab instantiation (needs complete World) --
+
+inline Entity instantiate(World& world, const Prefab& prefab) {
+    ECS_ASSERT(!world.iterating_, "structural change during iteration");
+    ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
+
+    // Build TypeSet from prefab entries
+    TypeSet ts;
+    ts.reserve(prefab.component_count());
+    for (auto& entry : prefab.entries())
+        ts.push_back(entry.cid);
+    std::sort(ts.begin(), ts.end());
+
+    Archetype* arch = world.get_or_create_archetype(ts);
+
+    // Allocate entity
+    uint32_t idx;
+    if (!world.free_list_.empty()) {
+        idx = world.free_list_.back();
+        world.free_list_.pop_back();
+    } else {
+        idx = static_cast<uint32_t>(world.generations_.size());
+        world.generations_.push_back(0);
+        world.records_.push_back({});
+    }
+    uint32_t gen = world.generations_[idx];
+    Entity e{idx, gen};
+
+    size_t row = arch->count();
+    arch->push_entity(e);
+
+    // Copy-construct each component from prefab defaults
+    for (auto& entry : prefab.entries()) {
+        auto& col = arch->columns.at(entry.cid);
+        // copy_fn placement-new constructs into the column slot
+        entry.copy_fn(col.data + col.count * col.elem_size, prefab.data() + entry.buf_offset);
+        ++col.count;
+    }
+    arch->assert_parity();
+
+    world.records_[idx] = {arch, row};
+
+    // Fire on_add hooks
+    for (auto& entry : prefab.entries()) {
+        world.fire_hooks(world.on_add_hooks_, entry.cid, e, arch->columns.at(entry.cid).get(row));
+    }
+
+    return e;
+}
+
+template <typename... Overrides>
+Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides) {
+    ECS_ASSERT(!world.iterating_, "structural change during iteration");
+    ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
+
+    // Ensure column factories for override types
+    (ensure_column_factory<std::decay_t<Overrides>>(), ...);
+
+    // Build TypeSet: prefab entries + any extra override types
+    TypeSet ts;
+    ts.reserve(prefab.component_count() + sizeof...(Overrides));
+    for (auto& entry : prefab.entries())
+        ts.push_back(entry.cid);
+
+    // Add override type IDs not already in prefab
+    ComponentTypeID override_ids[] = {component_id<std::decay_t<Overrides>>()...};
+    for (auto oid : override_ids) {
+        bool found = false;
+        for (auto cid : ts) {
+            if (cid == oid) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            ts.push_back(oid);
+    }
+    std::sort(ts.begin(), ts.end());
+
+    Archetype* arch = world.get_or_create_archetype(ts);
+
+    // Allocate entity
+    uint32_t idx;
+    if (!world.free_list_.empty()) {
+        idx = world.free_list_.back();
+        world.free_list_.pop_back();
+    } else {
+        idx = static_cast<uint32_t>(world.generations_.size());
+        world.generations_.push_back(0);
+        world.records_.push_back({});
+    }
+    uint32_t gen = world.generations_[idx];
+    Entity e{idx, gen};
+
+    size_t row = arch->count();
+    arch->push_entity(e);
+
+    // Build a set of overridden type IDs for quick lookup
+    // (small array, linear scan is fine for typical override counts)
+
+    // Copy non-overridden prefab defaults
+    for (auto& entry : prefab.entries()) {
+        bool overridden = false;
+        for (auto oid : override_ids) {
+            if (entry.cid == oid) {
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) {
+            auto& col = arch->columns.at(entry.cid);
+            entry.copy_fn(col.data + col.count * col.elem_size, prefab.data() + entry.buf_offset);
+            ++col.count;
+        }
+    }
+
+    // Push overrides (move-construct)
+    auto push_override = [&](auto&& comp) {
+        using U = std::decay_t<decltype(comp)>;
+        auto& col = arch->columns.at(component_id<U>());
+        U tmp = std::forward<decltype(comp)>(comp);
+        col.push_raw(&tmp);
+    };
+    (push_override(std::forward<Overrides>(overrides)), ...);
+
+    arch->assert_parity();
+    world.records_[idx] = {arch, row};
+
+    // Fire on_add hooks for all components
+    for (auto cid : ts) {
+        world.fire_hooks(world.on_add_hooks_, cid, e, arch->columns.at(cid).get(row));
+    }
+
+    return e;
 }
 
 } // namespace ecs

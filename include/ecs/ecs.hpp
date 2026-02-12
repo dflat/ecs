@@ -4,6 +4,7 @@
 #include "command_buffer.hpp"
 #include "component.hpp"
 #include "entity.hpp"
+#include "prefab.hpp"
 #include "serialization.hpp"
 #include "system.hpp"
 #include "world.hpp"
