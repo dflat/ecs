@@ -7,8 +7,19 @@
 
 namespace ecs {
 
-// BFS propagation of LocalTransform -> WorldTransform through the hierarchy.
-// Roots are entities with LocalTransform + WorldTransform but no Parent.
+/**
+ * @brief Updates `WorldTransform` components based on `LocalTransform` and hierarchy.
+ *
+ * @details Performs a Breadth-First Search (BFS) traversal starting from root entities (those with
+ * no `Parent`). Computes the world transform by multiplying the parent's world transform
+ * with the child's local transform.
+ *
+ * - Roots: WorldTransform = LocalTransform
+ * - Children: WorldTransform = Parent.WorldTransform * LocalTransform
+ *
+ * @param world The world to update.
+ * @note Entities missing either LocalTransform or WorldTransform are skipped.
+ */
 inline void propagate_transforms(World& world) {
     std::queue<Entity> queue;
 

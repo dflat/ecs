@@ -13,9 +13,23 @@ namespace ecs {
 
 class World; // forward declaration — flush() defined after World in world.hpp
 
+/**
+ * @brief Records structural changes to be executed later.
+ *
+ * @details The CommandBuffer allows systems to queue operations like entity creation,
+ * destruction, or component addition/removal while iterating over the World. This avoids
+ * invalidating iterators or modifying the archetype graph during a query.
+ *
+ * Commands are stored in a linear byte buffer and executed in FIFO order when `flush()` is called.
+ */
 class CommandBuffer {
 public:
     CommandBuffer() = default;
+
+    /**
+     * @brief Destructor.
+     * @details Destroys any unflushed components stored in the buffer to prevent memory leaks.
+     */
     ~CommandBuffer() { destroy_unflushed(); }
 
     CommandBuffer(const CommandBuffer&) = delete;
@@ -23,11 +37,21 @@ public:
     CommandBuffer(CommandBuffer&&) = default;
     CommandBuffer& operator=(CommandBuffer&&) = default;
 
+    /**
+     * @brief Queues an entity for destruction.
+     * @param e The entity to destroy.
+     */
     void destroy(Entity e) {
         auto* hdr = write_header(CmdTag::Destroy, e, 0, 0, nullptr, nullptr, nullptr);
         (void)hdr;
     }
 
+    /**
+     * @brief Queues a component addition/update.
+     * @tparam T The component type.
+     * @param e The target entity.
+     * @param comp The component value (moved into the buffer).
+     */
     template <typename T>
     void add(Entity e, T&& comp) {
         using U = std::decay_t<T>;
@@ -39,12 +63,22 @@ public:
         new (dst) U(std::forward<T>(comp));
     }
 
+    /**
+     * @brief Queues a component removal.
+     * @tparam T The component type to remove.
+     * @param e The target entity.
+     */
     template <typename T>
     void remove(Entity e) {
         write_header(CmdTag::Remove, e, component_id<std::decay_t<T>>(), 0, nullptr, nullptr,
                      nullptr);
     }
 
+    /**
+     * @brief Queues the creation of a new entity with multiple components.
+     * @tparam Ts Component types to initialize.
+     * @param comps Component values (moved into the buffer).
+     */
     template <typename... Ts>
     void create_with(Ts&&... comps) {
         static_assert(sizeof...(Ts) > 0, "create_with requires at least one component");
@@ -55,8 +89,17 @@ public:
         (write_sub_entry<Ts>(std::forward<Ts>(comps)), ...);
     }
 
+    /**
+     * @brief Executes all queued commands on the specified World.
+     * @param w The World to update.
+     * @details Clears the buffer after execution.
+     */
     void flush(World& w); // defined after World class in world.hpp
 
+    /**
+     * @brief Checks if the buffer contains any pending commands.
+     * @return true if empty, false otherwise.
+     */
     bool empty() const { return buf_.empty(); }
 
 private:

@@ -10,8 +10,15 @@
 
 namespace ecs {
 
+/**
+ * @brief Represents a unique combination of component types.
+ * @details Sorted vector of ComponentTypeIDs. Used as a key to identify Archetypes.
+ */
 using TypeSet = std::vector<ComponentTypeID>;
 
+/**
+ * @brief Hasher for TypeSet to allow usage in unordered maps.
+ */
 struct TypeSetHash {
     size_t operator()(const TypeSet& ts) const {
         size_t h = ts.size();
@@ -21,30 +28,58 @@ struct TypeSetHash {
     }
 };
 
+/**
+ * @brief Helper to create a sorted TypeSet from an initializer list.
+ */
 inline TypeSet make_typeset(std::initializer_list<ComponentTypeID> ids) {
     TypeSet ts(ids);
     std::sort(ts.begin(), ts.end());
     return ts;
 }
 
+/**
+ * @brief Caches transitions between archetypes.
+ * @details Used to quickly find the target archetype when adding or removing a component from an entity.
+ */
 struct ArchetypeEdge {
     struct Archetype* add_target = nullptr;
     struct Archetype* remove_target = nullptr;
 };
 
+/**
+ * @brief Stores a collection of entities that all possess the exact same set of components.
+ *
+ * @details The Archetype is the core storage unit of the ECS. It stores components in a
+ * Structure-of-Arrays (SoA) layout (via `ComponentColumn`). This ensures high cache locality
+ * when iterating over components of a specific type.
+ *
+ * Memory is managed in a single large block (`block_`) which is subdivided among the columns.
+ * When the capacity is exceeded, the entire block is reallocated and data is migrated.
+ */
 struct Archetype {
     static constexpr size_t CHUNK_ALIGN = 16;
 
+    /** @brief The sorted list of component types this archetype stores. */
     TypeSet type_set;
+    /** @brief Bitset for fast component presence checks (optimization for small ID counts). */
     std::bitset<256> component_bits;
+    /** @brief Map of component ID to its data column. */
     std::map<ComponentTypeID, ComponentColumn> columns;
+    /** @brief List of entities currently stored in this archetype. */
     std::vector<Entity> entities;
 
-    // Edge cache: component_id -> archetype reached by adding/removing that component
+    /**
+     * @brief Edge cache: component_id -> archetype reached by adding/removing that component.
+     * @details Optimization to avoid repeated TypeSet lookups during structural changes.
+     */
     std::map<ComponentTypeID, ArchetypeEdge> edges;
 
     Archetype() = default;
 
+    /**
+     * @brief Destructor.
+     * @details Destroys all components in all columns and frees the raw memory block.
+     */
     ~Archetype() {
         for (auto& [id, col] : columns)
             col.destroy_all();
@@ -84,24 +119,35 @@ struct Archetype {
     Archetype(const Archetype&) = delete;
     Archetype& operator=(const Archetype&) = delete;
 
+    /** @brief Returns the number of entities in this archetype. */
     size_t count() const { return entities.size(); }
 
+    /** @brief Checks if this archetype contains the specified component type. */
     bool has_component(ComponentTypeID id) const { return columns.find(id) != columns.end(); }
 
+    /** @brief Debug assertion to verify all columns have the same count as the entity list. */
     void assert_parity() const {
         for (auto& [id, col] : columns)
             ECS_ASSERT(col.count == entities.size(), "entity-column parity violated");
     }
 
-    // Append an entity with no component data yet (columns must be pushed separately).
-    // Ensures capacity for the new entity across all columns.
+    /**
+     * @brief Appends an entity to the archetype.
+     * @details Reserves space in all columns. The caller is responsible for subsequently
+     * pushing the component data into the columns.
+     * @param e The entity to add.
+     */
     void push_entity(Entity e) {
         ensure_capacity(count() + 1);
         entities.push_back(e);
     }
 
-    // Swap-remove entity at row, returns the entity that was swapped into that row
-    // (or INVALID_ENTITY if it was the last row)
+    /**
+     * @brief Removes an entity at a specific row using the "swap and pop" idiom.
+     * @details The entity at `row` is replaced by the last entity in the list to maintain compactness.
+     * @param row The index of the entity to remove.
+     * @return The Entity that was moved into `row` (the one that was previously last), or INVALID_ENTITY if the removed entity was the last one.
+     */
     Entity swap_remove(size_t row) {
         Entity swapped = INVALID_ENTITY;
         if (row < entities.size() - 1) {
@@ -115,7 +161,11 @@ struct Archetype {
         return swapped;
     }
 
-    // Ensure all columns have capacity for at least `needed` elements.
+    /**
+     * @brief Resizes the underlying memory block to hold at least `needed` elements.
+     * @details If reallocation is required, all existing components are moved to the new block.
+     * @param needed Minimum capacity required.
+     */
     void ensure_capacity(size_t needed) {
         if (capacity_ >= needed)
             return;

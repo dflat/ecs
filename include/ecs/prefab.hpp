@@ -13,6 +13,14 @@ namespace ecs {
 
 class World; // forward declaration
 
+/**
+ * @brief A template for creating entities with a predefined set of components.
+ *
+ * @details Prefabs store a copy of component data. When instantiated, this data is copied
+ * into the new entity. This is useful for spawning multiple similar objects (e.g., bullets, enemies).
+ *
+ * All components in a Prefab MUST be copy-constructible.
+ */
 class Prefab {
 public:
     struct Entry {
@@ -69,6 +77,12 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Creates a new Prefab from a list of components.
+     * @tparam Ts Component types.
+     * @param components The component values to store as defaults.
+     * @return The new Prefab.
+     */
     template <typename... Ts>
     static Prefab create(Ts&&... components) {
         static_assert(sizeof...(Ts) > 0, "Prefab::create requires at least one component");
@@ -131,8 +145,23 @@ private:
 };
 
 // Free function declarations — defined after World in world.hpp
+
+/**
+ * @brief Creates a new entity in the world using the prefab's components.
+ * @param world The target world.
+ * @param prefab The source prefab.
+ * @return The new entity handle.
+ */
 Entity instantiate(World& world, const Prefab& prefab);
 
+/**
+ * @brief Creates a new entity from a prefab, overriding specific components.
+ * @tparam Overrides Types of components to override or add.
+ * @param world The target world.
+ * @param prefab The source prefab.
+ * @param overrides Component values to use instead of the prefab defaults.
+ * @return The new entity handle.
+ */
 template <typename... Overrides>
 Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides);
 
