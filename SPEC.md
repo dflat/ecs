@@ -1,6 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.8
+**Version:** 0.9
 **Status:** Draft
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
@@ -332,6 +332,40 @@ Binary serialization of the entire world state. All component types present in t
 
 Round-trip preserves: all entities (alive and destroyed), component data, archetype structure, generation counters, and free list. Resources, observers, and deferred commands are not serialized.
 
+### 3.11 Prefabs
+
+Prefabs are reusable entity templates with default component values. They are data, not entities — they don't appear in queries.
+
+**Creation:**
+
+```cpp
+Prefab enemy = Prefab::create(Position{0, 0}, Velocity{0, 0}, Health{100});
+```
+
+All component types in a prefab must be **copy-constructible** (enforced via `static_assert`). The prefab stores type-erased defaults in a flat byte buffer.
+
+**Instantiation (free functions):**
+
+```cpp
+Entity e = instantiate(world, enemy);                    // copy all defaults
+Entity e = instantiate(world, enemy, Position{10, 5});   // override Position
+Entity e = instantiate(world, enemy, Velocity{5, 0}, Tag{});  // override + extend
+```
+
+- `instantiate(world, prefab)` creates an entity with all prefab defaults copied.
+- `instantiate(world, prefab, overrides...)` applies overrides. If an override type exists in the prefab, the override value replaces the default. If an override type is NOT in the prefab, it extends the entity (the entity gets the extra component in addition to all prefab defaults).
+
+**Querying a prefab:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `has<T>` | `bool has<T>() const` | Check if prefab contains component type `T`. |
+| `component_count` | `size_t component_count() const` | Number of component types in the prefab. |
+
+**Observers:** `on_add` hooks fire for all components when an entity is instantiated from a prefab.
+
+**Prefab copying:** Prefabs are copyable and movable. Copying a prefab copy-constructs all stored component defaults.
+
 ---
 
 ## 4. System Registry
@@ -438,12 +472,12 @@ Planned features, roughly ordered by priority. Each item should get its own spec
 - ~~Archetype sorting~~ — §3.9. Sort entities within archetypes by a component comparator.
 - ~~Bitset archetype matching~~ — §3.5. Fixed-size bitset per archetype for fast query matching.
 - ~~Serialization~~ — §3.10. Stable type registration and binary world snapshots.
+- ~~Prefabs~~ — §3.11. Reusable entity templates with default component values.
 
 ### 8.2 Long-Term
 
 - **Parallel iteration.** Split archetype iteration across threads. Requires read/write access declarations per system and a dependency-aware scheduler.
 - **Scripting bridge.** Type-erased component access for dynamic languages (Python, Lua). Likely via string-keyed component lookup and void* accessors.
-- **Prefabs / templates.** Define archetype templates for batch entity creation with shared defaults.
 
 ---
 
@@ -463,6 +497,7 @@ ecs/
 │   ├── world.hpp                               World (main API), EntityRecord, DeferredProxy, query cache
 │   ├── serialization.hpp                       serialize(), deserialize() (binary world snapshots)
 │   ├── command_buffer.hpp                      CommandBuffer (standalone deferred command queue)
+│   ├── prefab.hpp                              Prefab, instantiate() (reusable entity templates)
 │   ├── system.hpp                              SystemRegistry (auto-flushes deferred commands)
 │   └── builtin/
 │       ├── transform.hpp                       Mat4, LocalTransform, WorldTransform

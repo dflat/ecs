@@ -1,7 +1,9 @@
 #pragma once
 #include "archetype.hpp"
+#include "command_buffer.hpp"
 #include "component.hpp"
 #include "entity.hpp"
+#include "prefab.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -169,46 +171,11 @@ public:
 
     // -- Deferred commands --
 
-    class DeferredProxy {
-    public:
-        explicit DeferredProxy(std::vector<std::function<void(World&)>>& cmds) : cmds_(cmds) {}
-
-        void destroy(Entity e) {
-            cmds_.push_back([e](World& w) { w.destroy(e); });
-        }
-
-        template <typename T>
-        void add(Entity e, T&& comp) {
-            auto ptr = std::make_shared<std::decay_t<T>>(std::forward<T>(comp));
-            cmds_.push_back([e, ptr](World& w) { w.add<std::decay_t<T>>(e, std::move(*ptr)); });
-        }
-
-        template <typename T>
-        void remove(Entity e) {
-            cmds_.push_back([e](World& w) { w.remove<std::decay_t<T>>(e); });
-        }
-
-        template <typename... Ts>
-        void create_with(Ts&&... comps) {
-            auto data =
-                std::make_shared<std::tuple<std::decay_t<Ts>...>>(std::forward<Ts>(comps)...);
-            cmds_.push_back([data](World& w) {
-                std::apply([&w](auto&&... args) { w.create_with(std::move(args)...); },
-                           std::move(*data));
-            });
-        }
-
-    private:
-        std::vector<std::function<void(World&)>>& cmds_;
-    };
-
-    DeferredProxy deferred() { return DeferredProxy{deferred_commands_}; }
+    CommandBuffer& deferred() { return deferred_commands_; }
 
     void flush_deferred() {
         ECS_ASSERT(!iterating_, "flush during iteration");
-        auto cmds = std::move(deferred_commands_);
-        for (auto& cmd : cmds)
-            cmd(*this);
+        deferred_commands_.flush(*this);
     }
 
     // -- Resources --
@@ -501,6 +468,10 @@ public:
 
     friend void serialize(const World& world, std::ostream& out);
     friend void deserialize(World& world, std::istream& in);
+    friend class CommandBuffer;
+    friend Entity instantiate(World& world, const Prefab& prefab);
+    template <typename... Overrides>
+    friend Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides);
 
 private:
     struct ErasedResource {
@@ -534,7 +505,7 @@ private:
     std::unordered_map<TypeSet, std::unique_ptr<Archetype>, TypeSetHash> archetypes_;
     std::unordered_map<ComponentTypeID, ErasedResource> resources_;
     bool iterating_ = false;
-    std::vector<std::function<void(World&)>> deferred_commands_;
+    CommandBuffer deferred_commands_;
 
     // -- Observer hooks --
     std::unordered_map<ComponentTypeID, std::vector<std::function<void(World&, Entity, void*)>>>
@@ -653,6 +624,84 @@ private:
         col.push_raw(&tmp);
     }
 
+    // Type-erased add: migrates entity and moves raw component data into the new archetype.
+    void add_raw(Entity e, ComponentTypeID cid, void* data, ComponentColumn::MoveFunc move_fn) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
+        if (!alive(e))
+            return;
+        auto& rec = records_[e.index];
+        Archetype* old_arch = rec.archetype;
+        if (old_arch->has_component(cid)) {
+            // Already has it — overwrite via move
+            auto& col = old_arch->columns.at(cid);
+            col.destroy_fn(col.get(rec.row));
+            move_fn(col.get(rec.row), data);
+            return;
+        }
+
+        Archetype* new_arch = find_add_target(old_arch, cid);
+        migrate_entity(e, old_arch, new_arch, rec.row);
+
+        auto& col = new_arch->columns.at(cid);
+        col.push_raw(data);
+
+        fire_hooks(on_add_hooks_, cid, e, new_arch->columns.at(cid).get(records_[e.index].row));
+    }
+
+    // Type-erased remove component.
+    void remove_raw(Entity e, ComponentTypeID cid) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
+        if (!alive(e))
+            return;
+        auto& rec = records_[e.index];
+        Archetype* old_arch = rec.archetype;
+        if (!old_arch->has_component(cid))
+            return;
+
+        Archetype* new_arch = find_remove_target(old_arch, cid);
+        size_t old_row = rec.row;
+
+        fire_hooks(on_remove_hooks_, cid, e, old_arch->columns.at(cid).get(old_row));
+        migrate_entity_removing(e, old_arch, new_arch, old_row, cid);
+    }
+
+    // Type-erased create_with: creates entity with N components given as parallel arrays.
+    Entity create_with_raw(ComponentTypeID* ids, void** data, ComponentColumn::MoveFunc* /*moves*/,
+                           size_t count) {
+        ECS_ASSERT(!iterating_, "structural change during iteration");
+        TypeSet ts(ids, ids + count);
+        std::sort(ts.begin(), ts.end());
+        Archetype* arch = get_or_create_archetype(ts);
+
+        uint32_t idx;
+        if (!free_list_.empty()) {
+            idx = free_list_.back();
+            free_list_.pop_back();
+        } else {
+            idx = static_cast<uint32_t>(generations_.size());
+            generations_.push_back(0);
+            records_.push_back({});
+        }
+        uint32_t gen = generations_[idx];
+        Entity e{idx, gen};
+
+        size_t row = arch->count();
+        arch->push_entity(e);
+        for (size_t i = 0; i < count; ++i) {
+            auto& col = arch->columns.at(ids[i]);
+            col.push_raw(data[i]);
+        }
+        arch->assert_parity();
+
+        records_[idx] = {arch, row};
+
+        for (size_t i = 0; i < count; ++i) {
+            fire_hooks(on_add_hooks_, ids[i], e, arch->columns.at(ids[i]).get(row));
+        }
+
+        return e;
+    }
+
     // Migrate entity from old_arch[old_row] to new_arch, moving all shared columns.
     // Does NOT handle the added component — caller pushes it after.
     void migrate_entity(Entity e, Archetype* old_arch, Archetype* new_arch, size_t old_row) {
@@ -709,5 +758,213 @@ private:
         records_[e.index] = {new_arch, new_row};
     }
 };
+
+// -- CommandBuffer::flush() definition (needs complete World type) --
+
+inline void CommandBuffer::flush(World& w) {
+    // Take ownership of buffer to allow re-entrant commands during flush
+    std::vector<uint8_t> local_buf = std::move(buf_);
+    buf_.clear();
+
+    size_t pos = 0;
+    while (pos < local_buf.size()) {
+        pos = align_up(pos, alignof(CmdHeader));
+        if (pos + sizeof(CmdHeader) > local_buf.size())
+            break;
+        auto* hdr = reinterpret_cast<CmdHeader*>(local_buf.data() + pos);
+        pos += sizeof(CmdHeader);
+
+        switch (hdr->tag) {
+        case CmdTag::Destroy:
+            w.destroy(hdr->entity);
+            break;
+        case CmdTag::Add: {
+            pos = align_up(pos, alignof(std::max_align_t));
+            void* data = local_buf.data() + pos;
+            w.add_raw(hdr->entity, hdr->cid, data, hdr->move_fn);
+            // If add_raw consumed the data via move, the source is now moved-from.
+            // If the entity was dead and add_raw was a no-op, we must destroy the data.
+            // add_raw calls push_raw which move-constructs and destroys source, OR
+            // it overwrites via destroy+move. Either way the source is consumed.
+            // If entity was dead, add_raw returned early — destroy the unconsumed data.
+            if (!w.alive(hdr->entity))
+                hdr->destroy_fn(data);
+            pos += hdr->payload;
+            break;
+        }
+        case CmdTag::Remove:
+            w.remove_raw(hdr->entity, hdr->cid);
+            break;
+        case CmdTag::CreateWith: {
+            size_t count = hdr->payload;
+            // Collect sub-entries
+            struct Gathered {
+                ComponentTypeID cid;
+                void* data;
+                ComponentColumn::MoveFunc move_fn;
+                ComponentColumn::DestroyFunc destroy_fn;
+            };
+            std::vector<Gathered> entries;
+            entries.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                pos = align_up(pos, alignof(SubEntry));
+                auto* sub = reinterpret_cast<SubEntry*>(local_buf.data() + pos);
+                pos += sizeof(SubEntry);
+                pos = align_up(pos, alignof(std::max_align_t));
+                void* data = local_buf.data() + pos;
+                entries.push_back({sub->cid, data, sub->move_fn, sub->destroy_fn});
+                pos += sub->elem_size;
+            }
+            // Build parallel arrays for create_with_raw
+            std::vector<ComponentTypeID> ids(count);
+            std::vector<void*> data_ptrs(count);
+            std::vector<ComponentColumn::MoveFunc> moves(count);
+            for (size_t i = 0; i < count; ++i) {
+                ids[i] = entries[i].cid;
+                data_ptrs[i] = entries[i].data;
+                moves[i] = entries[i].move_fn;
+            }
+            w.create_with_raw(ids.data(), data_ptrs.data(), moves.data(), count);
+            break;
+        }
+        }
+    }
+}
+
+// -- Prefab instantiation (needs complete World) --
+
+inline Entity instantiate(World& world, const Prefab& prefab) {
+    ECS_ASSERT(!world.iterating_, "structural change during iteration");
+    ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
+
+    // Build TypeSet from prefab entries
+    TypeSet ts;
+    ts.reserve(prefab.component_count());
+    for (auto& entry : prefab.entries())
+        ts.push_back(entry.cid);
+    std::sort(ts.begin(), ts.end());
+
+    Archetype* arch = world.get_or_create_archetype(ts);
+
+    // Allocate entity
+    uint32_t idx;
+    if (!world.free_list_.empty()) {
+        idx = world.free_list_.back();
+        world.free_list_.pop_back();
+    } else {
+        idx = static_cast<uint32_t>(world.generations_.size());
+        world.generations_.push_back(0);
+        world.records_.push_back({});
+    }
+    uint32_t gen = world.generations_[idx];
+    Entity e{idx, gen};
+
+    size_t row = arch->count();
+    arch->push_entity(e);
+
+    // Copy-construct each component from prefab defaults
+    for (auto& entry : prefab.entries()) {
+        auto& col = arch->columns.at(entry.cid);
+        // copy_fn placement-new constructs into the column slot
+        entry.copy_fn(col.data + col.count * col.elem_size, prefab.data() + entry.buf_offset);
+        ++col.count;
+    }
+    arch->assert_parity();
+
+    world.records_[idx] = {arch, row};
+
+    // Fire on_add hooks
+    for (auto& entry : prefab.entries()) {
+        world.fire_hooks(world.on_add_hooks_, entry.cid, e, arch->columns.at(entry.cid).get(row));
+    }
+
+    return e;
+}
+
+template <typename... Overrides>
+Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides) {
+    ECS_ASSERT(!world.iterating_, "structural change during iteration");
+    ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
+
+    // Ensure column factories for override types
+    (ensure_column_factory<std::decay_t<Overrides>>(), ...);
+
+    // Build TypeSet: prefab entries + any extra override types
+    TypeSet ts;
+    ts.reserve(prefab.component_count() + sizeof...(Overrides));
+    for (auto& entry : prefab.entries())
+        ts.push_back(entry.cid);
+
+    // Add override type IDs not already in prefab
+    ComponentTypeID override_ids[] = {component_id<std::decay_t<Overrides>>()...};
+    for (auto oid : override_ids) {
+        bool found = false;
+        for (auto cid : ts) {
+            if (cid == oid) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            ts.push_back(oid);
+    }
+    std::sort(ts.begin(), ts.end());
+
+    Archetype* arch = world.get_or_create_archetype(ts);
+
+    // Allocate entity
+    uint32_t idx;
+    if (!world.free_list_.empty()) {
+        idx = world.free_list_.back();
+        world.free_list_.pop_back();
+    } else {
+        idx = static_cast<uint32_t>(world.generations_.size());
+        world.generations_.push_back(0);
+        world.records_.push_back({});
+    }
+    uint32_t gen = world.generations_[idx];
+    Entity e{idx, gen};
+
+    size_t row = arch->count();
+    arch->push_entity(e);
+
+    // Build a set of overridden type IDs for quick lookup
+    // (small array, linear scan is fine for typical override counts)
+
+    // Copy non-overridden prefab defaults
+    for (auto& entry : prefab.entries()) {
+        bool overridden = false;
+        for (auto oid : override_ids) {
+            if (entry.cid == oid) {
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) {
+            auto& col = arch->columns.at(entry.cid);
+            entry.copy_fn(col.data + col.count * col.elem_size, prefab.data() + entry.buf_offset);
+            ++col.count;
+        }
+    }
+
+    // Push overrides (move-construct)
+    auto push_override = [&](auto&& comp) {
+        using U = std::decay_t<decltype(comp)>;
+        auto& col = arch->columns.at(component_id<U>());
+        U tmp = std::forward<decltype(comp)>(comp);
+        col.push_raw(&tmp);
+    };
+    (push_override(std::forward<Overrides>(overrides)), ...);
+
+    arch->assert_parity();
+    world.records_[idx] = {arch, row};
+
+    // Fire on_add hooks for all components
+    for (auto cid : ts) {
+        world.fire_hooks(world.on_add_hooks_, cid, e, arch->columns.at(cid).get(row));
+    }
+
+    return e;
+}
 
 } // namespace ecs

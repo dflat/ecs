@@ -1224,6 +1224,34 @@ void test_serialize_with_hierarchy() {
     std::printf("  serialize with hierarchy: OK\n");
 }
 
+void test_command_buffer_move_only() {
+    World w;
+    CommandBuffer cb;
+    cb.add(w.create_with(Position{0, 0}), std::make_unique<int>(42));
+    cb.create_with(std::make_unique<int>(99));
+    cb.flush(w);
+    assert(w.count<std::unique_ptr<int>>() == 2);
+
+    // Also test via deferred()
+    Entity e = w.create_with(Position{1, 1});
+    w.deferred().add(e, std::make_unique<int>(7));
+    w.flush_deferred();
+    assert(w.has<std::unique_ptr<int>>(e));
+    assert(*w.get<std::unique_ptr<int>>(e) == 7);
+    std::printf("  command buffer move-only: OK\n");
+}
+
+void test_command_buffer_unflushed_cleanup() {
+    // Verify that unflushed commands with non-trivial types don't leak
+    {
+        CommandBuffer cb;
+        cb.create_with(std::string("a long string to avoid small string optimization entirely"));
+        cb.add(Entity{1, 0}, std::string("another long string to avoid SSO completely here"));
+        // cb goes out of scope without flush — destructor should clean up
+    }
+    std::printf("  command buffer unflushed cleanup: OK\n");
+}
+
 void test_serialize_unregistered_type_asserts() {
     // Use a type that is NOT registered
     struct Unregistered {
@@ -1244,6 +1272,122 @@ void test_serialize_unregistered_type_asserts() {
     signal(SIGABRT, old_handler);
     assert(caught);
     std::printf("  serialize unregistered type asserts: OK\n");
+}
+
+// --- Phase 11: Prefabs ---
+
+void test_prefab_instantiate_defaults() {
+    World w;
+    Prefab enemy = Prefab::create(Position{1, 2}, Velocity{3, 4}, Health{100});
+    Entity e = instantiate(w, enemy);
+
+    assert(w.alive(e));
+    assert(w.has<Position>(e));
+    assert(w.has<Velocity>(e));
+    assert(w.has<Health>(e));
+    assert(w.get<Position>(e).x == 1.0f && w.get<Position>(e).y == 2.0f);
+    assert(w.get<Velocity>(e).dx == 3.0f && w.get<Velocity>(e).dy == 4.0f);
+    assert(w.get<Health>(e).hp == 100);
+    std::printf("  prefab instantiate defaults: OK\n");
+}
+
+void test_prefab_instantiate_override() {
+    World w;
+    Prefab enemy = Prefab::create(Position{0, 0}, Velocity{1, 1}, Health{100});
+    Entity e = instantiate(w, enemy, Position{10, 20});
+
+    assert(w.get<Position>(e).x == 10.0f && w.get<Position>(e).y == 20.0f);
+    assert(w.get<Velocity>(e).dx == 1.0f && w.get<Velocity>(e).dy == 1.0f);
+    assert(w.get<Health>(e).hp == 100);
+    std::printf("  prefab instantiate override: OK\n");
+}
+
+void test_prefab_many_entities() {
+    World w;
+    Prefab bullet = Prefab::create(Position{0, 0}, Velocity{10, 0});
+
+    for (int i = 0; i < 100; ++i) {
+        Entity e = instantiate(w, bullet, Position{float(i), 0});
+        assert(w.get<Position>(e).x == float(i));
+        assert(w.get<Velocity>(e).dx == 10.0f);
+    }
+    assert(w.count<Position>() == 100);
+    assert((w.count<Position, Velocity>() == 100));
+
+    // Verify entities are independent: mutating one doesn't affect others
+    w.each<Position>([&](Entity, Position& p) { p.x += 1.0f; });
+    // No crash, all modified
+    std::printf("  prefab many entities: OK\n");
+}
+
+void test_prefab_nontrivial_type() {
+    World w;
+    Prefab p =
+        Prefab::create(std::string("a long string to avoid small string optimization entirely"));
+    Entity e = instantiate(w, p);
+    assert(w.get<std::string>(e) == "a long string to avoid small string optimization entirely");
+
+    // Instantiate another — should be independent copy
+    Entity e2 = instantiate(w, p);
+    assert(w.get<std::string>(e2) == "a long string to avoid small string optimization entirely");
+    w.get<std::string>(e2) = "modified";
+    assert(w.get<std::string>(e) == "a long string to avoid small string optimization entirely");
+    std::printf("  prefab nontrivial type: OK\n");
+}
+
+void test_prefab_has_and_count() {
+    Prefab p = Prefab::create(Position{0, 0}, Health{50});
+    assert(p.has<Position>());
+    assert(p.has<Health>());
+    assert(!p.has<Velocity>());
+    assert(p.component_count() == 2);
+    std::printf("  prefab has and count: OK\n");
+}
+
+void test_prefab_override_extra_component() {
+    World w;
+    Prefab base = Prefab::create(Position{0, 0}, Health{100});
+    // Override with a type NOT in the prefab
+    Entity e = instantiate(w, base, Velocity{5, 5});
+
+    assert(w.has<Position>(e));
+    assert(w.has<Health>(e));
+    assert(w.has<Velocity>(e));
+    assert(w.get<Position>(e).x == 0.0f);
+    assert(w.get<Health>(e).hp == 100);
+    assert(w.get<Velocity>(e).dx == 5.0f);
+    std::printf("  prefab override extra component: OK\n");
+}
+
+void test_prefab_on_add_fires() {
+    World w;
+    int add_count = 0;
+    w.on_add<Health>(std::function<void(World&, Entity, Health&)>([&](World&, Entity, Health& h) {
+        ++add_count;
+        assert(h.hp == 100);
+    }));
+
+    Prefab p = Prefab::create(Position{0, 0}, Health{100});
+    instantiate(w, p);
+    assert(add_count == 1);
+
+    instantiate(w, p);
+    assert(add_count == 2);
+    std::printf("  prefab on_add fires: OK\n");
+}
+
+void test_prefab_destructor_cleanup() {
+    // Prefab with non-trivial type — sanitizer will catch leaks
+    {
+        Prefab p = Prefab::create(
+            std::string("a long string to avoid small string optimization entirely"));
+        // Copy the prefab
+        Prefab p2 = p;
+        // Move the prefab
+        Prefab p3 = std::move(p2);
+        // p goes out of scope, p3 goes out of scope
+    }
+    std::printf("  prefab destructor cleanup: OK\n");
 }
 
 int main() {
@@ -1281,6 +1425,8 @@ int main() {
     test_command_buffer_empty_flush();
     test_command_buffer_nontrivial_types();
     test_command_buffer_destroy_then_add();
+    test_command_buffer_move_only();
+    test_command_buffer_unflushed_cleanup();
     std::printf("  -- Phase 2.2 --\n");
     test_deferred_destroy_during_iteration();
     test_deferred_add_during_iteration();
@@ -1328,6 +1474,15 @@ int main() {
     test_serialize_empty_world();
     test_serialize_with_hierarchy();
     test_serialize_unregistered_type_asserts();
+    std::printf("  -- Phase 11 --\n");
+    test_prefab_instantiate_defaults();
+    test_prefab_instantiate_override();
+    test_prefab_many_entities();
+    test_prefab_nontrivial_type();
+    test_prefab_has_and_count();
+    test_prefab_override_extra_component();
+    test_prefab_on_add_fires();
+    test_prefab_destructor_cleanup();
     std::printf("All tests passed!\n");
     return 0;
 }

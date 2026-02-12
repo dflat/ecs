@@ -59,7 +59,7 @@ earlier ones. Items across phases are independent unless noted.
 - [ ] 10.2 Parallel dispatch
 
 ### Phase 11 — Prefabs
-- [ ] 11.1 Prefab templates
+- [x] 11.1 Prefab templates
 
 ---
 
