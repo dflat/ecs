@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file ecs.hpp
+ * @brief Main entry point for the ECS library.
+ * @details Includes all core ECS functionality and builtin components/systems.
+ */
+
 #include "archetype.hpp"
 #include "command_buffer.hpp"
 #include "component.hpp"

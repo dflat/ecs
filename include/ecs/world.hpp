@@ -16,19 +16,44 @@
 
 namespace ecs {
 
+/**
+ * @brief Internal tracking structure for an entity's location.
+ * @details Maps an Entity index to the specific Archetype and row where its data resides.
+ */
 struct EntityRecord {
     Archetype* archetype = nullptr;
     size_t row = 0;
 };
 
+/**
+ * @brief The central manager for the Entity Component System.
+ *
+ * @details The World class is responsible for:
+ * - Creating and destroying entities.
+ * - Managing the storage of components via Archetypes.
+ * - Executing queries over entities with specific component signatures.
+ * - Managing global "singleton" Resources.
+ * - Handling structural changes (adding/removing components) by migrating entities between archetypes.
+ * - Registering and invoking lifecycle hooks (observers).
+ *
+ * It is not thread-safe for write operations.
+ */
 class World {
 public:
+    /**
+     * @brief Constructs a new World.
+     * @details Initializes the entity index generation array. Index 0 is reserved for INVALID_ENTITY.
+     */
     World() {
         // Reserve index 0 so INVALID_ENTITY (index=0, gen=0) is never a live entity.
         generations_.push_back(1);
         records_.push_back({});
     }
 
+    /**
+     * @brief Destructor.
+     * @details Clears all resources and destroys the world.
+     */
     ~World() {
         // resources_ must be destroyed before other members since resource
         // destructors might reference nothing else, but explicit clear keeps
@@ -40,6 +65,11 @@ public:
 
     // -- Entity creation --
 
+    /**
+     * @brief Creates a new empty Entity.
+     * @return The handle to the newly created entity.
+     * @warning Asserts if called during query iteration (`each`).
+     */
     Entity create() {
         ECS_ASSERT(!iterating_, "structural change during iteration");
         uint32_t idx;
@@ -62,6 +92,13 @@ public:
         return e;
     }
 
+    /**
+     * @brief Creates a new Entity initialized with a set of components.
+     * @tparam Ts Types of the components to initialize.
+     * @param components The component values to move/copy into the entity.
+     * @return The handle to the newly created entity.
+     * @warning Asserts if called during query iteration.
+     */
     template <typename... Ts>
     Entity create_with(Ts&&... components) {
         ECS_ASSERT(!iterating_, "structural change during iteration");
@@ -101,6 +138,12 @@ public:
 
     // -- Entity destruction --
 
+    /**
+     * @brief Destroys an entity and releases its components.
+     * @param e The entity to destroy.
+     * @details If the entity is already dead, this does nothing.
+     * @warning Asserts if called during query iteration.
+     */
     void destroy(Entity e) {
         ECS_ASSERT(!iterating_, "structural change during iteration");
         if (!alive(e))
@@ -122,6 +165,11 @@ public:
         free_list_.push_back(e.index);
     }
 
+    /**
+     * @brief Checks if an entity handle refers to a valid, living entity.
+     * @param e The entity handle.
+     * @return true if valid and alive, false otherwise.
+     */
     bool alive(Entity e) const {
         return e.index < generations_.size() && e.generation == generations_[e.index] &&
                records_[e.index].archetype != nullptr;
@@ -129,7 +177,9 @@ public:
 
     // -- Utility queries --
 
-    // Total live entity count.
+    /**
+     * @brief Returns the total number of living entities in the world.
+     */
     size_t count() const {
         size_t total = 0;
         for (auto& [ts, arch] : archetypes_)
@@ -137,7 +187,10 @@ public:
         return total;
     }
 
-    // Count of entities matching all of Ts...
+    /**
+     * @brief Returns the number of entities that possess all specified components.
+     * @tparam Ts Component types to query for.
+     */
     template <typename... Ts>
     size_t count() const {
         ComponentTypeID ids[] = {component_id<Ts>()...};
@@ -156,8 +209,12 @@ public:
         return total;
     }
 
-    // Returns (Entity, Ts&...) for a query expected to match exactly one entity.
-    // Asserts on 0 or 2+ matches.
+    /**
+     * @brief Finds the single entity matching the components Ts... and invokes fn.
+     * @tparam Ts Component types identifying the entity.
+     * @tparam Func Callback function signature `void(Entity, Ts&...)`.
+     * @warning Asserts if 0 or more than 1 entity matches.
+     */
     template <typename... Ts, typename Func>
     void single(Func&& fn) {
         size_t found = 0;
@@ -171,8 +228,16 @@ public:
 
     // -- Deferred commands --
 
+    /**
+     * @brief Gets the command buffer for deferred operations.
+     * @details Use this to queue structural changes (add/remove/destroy) during iteration.
+     */
     CommandBuffer& deferred() { return deferred_commands_; }
 
+    /**
+     * @brief Executes all queued commands in the deferred buffer.
+     * @warning Asserts if called during query iteration.
+     */
     void flush_deferred() {
         ECS_ASSERT(!iterating_, "flush during iteration");
         deferred_commands_.flush(*this);
@@ -180,6 +245,12 @@ public:
 
     // -- Resources --
 
+    /**
+     * @brief Creates or updates a global resource.
+     * @tparam T The resource type.
+     * @param value The value to store.
+     * @details Resources are unique per type. Setting an existing resource type overwrites it.
+     */
     template <typename T>
     void set_resource(T&& value) {
         using U = std::decay_t<T>;
@@ -199,6 +270,12 @@ public:
         }
     }
 
+    /**
+     * @brief Retrieves a reference to a global resource.
+     * @tparam T The resource type.
+     * @return Reference to the resource.
+     * @warning Asserts if the resource does not exist.
+     */
     template <typename T>
     T& resource() {
         auto it = resources_.find(component_id<T>());
@@ -206,6 +283,11 @@ public:
         return *static_cast<T*>(it->second.data);
     }
 
+    /**
+     * @brief Tries to retrieve a pointer to a global resource.
+     * @tparam T The resource type.
+     * @return Pointer to the resource, or nullptr if not found.
+     */
     template <typename T>
     T* try_resource() {
         auto it = resources_.find(component_id<T>());
@@ -214,12 +296,20 @@ public:
         return static_cast<T*>(it->second.data);
     }
 
+    /**
+     * @brief Checks if a global resource exists.
+     * @tparam T The resource type.
+     */
     template <typename T>
     bool has_resource() const {
         auto it = resources_.find(component_id<T>());
         return it != resources_.end() && it->second.data;
     }
 
+    /**
+     * @brief Removes a global resource.
+     * @tparam T The resource type.
+     */
     template <typename T>
     void remove_resource() {
         resources_.erase(component_id<T>());
@@ -227,6 +317,11 @@ public:
 
     // -- Observers --
 
+    /**
+     * @brief Registers a callback invoked whenever a component of type T is added to an entity.
+     * @tparam T The component type.
+     * @param fn Callback signature `void(World&, Entity, T&)`.
+     */
     template <typename T>
     void on_add(std::function<void(World&, Entity, T&)> fn) {
         auto cid = component_id<std::decay_t<T>>();
@@ -235,6 +330,12 @@ public:
         });
     }
 
+    /**
+     * @brief Registers a callback invoked whenever a component of type T is removed from an entity.
+     * @tparam T The component type.
+     * @param fn Callback signature `void(World&, Entity, T&)`.
+     * @details The component data is valid during the callback but is destroyed immediately after.
+     */
     template <typename T>
     void on_remove(std::function<void(World&, Entity, T&)> fn) {
         auto cid = component_id<std::decay_t<T>>();
@@ -245,6 +346,12 @@ public:
 
     // -- Component access --
 
+    /**
+     * @brief Checks if an entity has a specific component.
+     * @tparam T The component type.
+     * @param e The entity.
+     * @return true if the entity exists and has the component.
+     */
     template <typename T>
     bool has(Entity e) const {
         if (!alive(e))
@@ -252,6 +359,13 @@ public:
         return records_[e.index].archetype->has_component(component_id<T>());
     }
 
+    /**
+     * @brief Retrieves a reference to an entity's component.
+     * @tparam T The component type.
+     * @param e The entity.
+     * @return Reference to the component.
+     * @warning Asserts if the entity is dead or missing the component.
+     */
     template <typename T>
     T& get(Entity e) {
         ECS_ASSERT(alive(e), "get<T> on dead entity");
@@ -261,6 +375,12 @@ public:
         return *static_cast<T*>(col.get(rec.row));
     }
 
+    /**
+     * @brief Tries to retrieve a pointer to an entity's component.
+     * @tparam T The component type.
+     * @param e The entity.
+     * @return Pointer to the component, or nullptr if missing/dead.
+     */
     template <typename T>
     T* try_get(Entity e) {
         if (!has<T>(e))
@@ -270,6 +390,15 @@ public:
 
     // -- Add component (archetype migration) --
 
+    /**
+     * @brief Adds or replaces a component on an entity.
+     * @tparam T The component type.
+     * @param e The entity.
+     * @param component The component data.
+     * @details If the entity already has T, the data is overwritten (assignment).
+     * If not, the entity is migrated to a new archetype containing T.
+     * @warning Asserts if called during query iteration.
+     */
     template <typename T>
     void add(Entity e, T&& component) {
         ECS_ASSERT(!iterating_, "structural change during iteration");
@@ -302,6 +431,13 @@ public:
 
     // -- Remove component (archetype migration) --
 
+    /**
+     * @brief Removes a component from an entity.
+     * @tparam T The component type.
+     * @param e The entity.
+     * @details Migrates the entity to an archetype without T. If the entity doesn't have T, does nothing.
+     * @warning Asserts if called during query iteration.
+     */
     template <typename T>
     void remove(Entity e) {
         ECS_ASSERT(!iterating_, "structural change during iteration");
@@ -329,6 +465,12 @@ public:
     template <typename... Ts>
     struct Exclude {};
 
+    /**
+     * @brief Iterates over all entities possessing components Ts...
+     * @tparam Ts Component types to match.
+     * @tparam Func Callback signature `void(Entity, Ts&...)`.
+     * @param fn The callback to invoke for each matching entity.
+     */
     template <typename... Ts, typename Func>
     void each(Func&& fn) {
         iterating_ = true;
@@ -349,6 +491,12 @@ public:
         }
     }
 
+    /**
+     * @brief Iterates over components Ts... ignoring the Entity ID.
+     * @tparam Ts Component types to match.
+     * @tparam Func Callback signature `void(Ts&...)`.
+     * @param fn The callback to invoke.
+     */
     template <typename... Ts, typename Func>
     void each_no_entity(Func&& fn) {
         iterating_ = true;
@@ -371,6 +519,13 @@ public:
 
     // -- Exclude-filter overloads --
 
+    /**
+     * @brief Iterates entities with Ts... but WITHOUT Ex...
+     * @tparam Ts Included component types.
+     * @tparam Ex Excluded component types.
+     * @tparam Func Callback signature `void(Entity, Ts&...)`.
+     * @param fn The callback.
+     */
     template <typename... Ts, typename... Ex, typename Func>
     void each(Exclude<Ex...>, Func&& fn) {
         iterating_ = true;
@@ -392,6 +547,13 @@ public:
         }
     }
 
+    /**
+     * @brief Iterates components Ts... (excluding Ex...) ignoring Entity ID.
+     * @tparam Ts Included component types.
+     * @tparam Ex Excluded component types.
+     * @tparam Func Callback signature `void(Ts&...)`.
+     * @param fn The callback.
+     */
     template <typename... Ts, typename... Ex, typename Func>
     void each_no_entity(Exclude<Ex...>, Func&& fn) {
         iterating_ = true;
@@ -415,6 +577,15 @@ public:
 
     // -- Sorting --
 
+    /**
+     * @brief Sorts entities in their archetypes based on a component comparison.
+     * @tparam T The component type to sort by.
+     * @tparam Compare Comparator type (e.g., lambda `bool(const T&, const T&)`).
+     * @param cmp The comparator function.
+     * @details This performs an in-place sort within each archetype containing T.
+     * This improves data locality for subsequent iterations.
+     * @warning Asserts if called during query iteration.
+     */
     template <typename T, typename Compare>
     void sort(Compare&& cmp) {
         ECS_ASSERT(!iterating_, "sort during iteration");
@@ -761,6 +932,11 @@ private:
 
 // -- CommandBuffer::flush() definition (needs complete World type) --
 
+/**
+ * @brief Flushes all queued commands in the buffer to the World.
+ * @details Commands are executed in FIFO order. Structural changes here are safe.
+ * @param w The World to apply commands to.
+ */
 inline void CommandBuffer::flush(World& w) {
     // Take ownership of buffer to allow re-entrant commands during flush
     std::vector<uint8_t> local_buf = std::move(buf_);
@@ -833,6 +1009,12 @@ inline void CommandBuffer::flush(World& w) {
 
 // -- Prefab instantiation (needs complete World) --
 
+/**
+ * @brief Instantiates an entity from a Prefab.
+ * @param world The target world.
+ * @param prefab The Prefab template.
+ * @return The new entity.
+ */
 inline Entity instantiate(World& world, const Prefab& prefab) {
     ECS_ASSERT(!world.iterating_, "structural change during iteration");
     ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
@@ -881,6 +1063,14 @@ inline Entity instantiate(World& world, const Prefab& prefab) {
     return e;
 }
 
+/**
+ * @brief Instantiates a Prefab with some overridden components.
+ * @tparam Overrides Component types to override or add.
+ * @param world The target world.
+ * @param prefab The Prefab template.
+ * @param overrides Component values to use instead of the prefab defaults (or in addition to them).
+ * @return The new entity.
+ */
 template <typename... Overrides>
 Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides) {
     ECS_ASSERT(!world.iterating_, "structural change during iteration");

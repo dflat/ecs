@@ -18,25 +18,52 @@
 
 namespace ecs {
 
+/**
+ * @brief Unique identifier type for component types.
+ */
 using ComponentTypeID = uint32_t;
 
+/**
+ * @brief Generates a new unique component type ID.
+ * @details This function is internal and thread-unsafe if called concurrently during initialization.
+ * @return A new ComponentTypeID.
+ */
 inline ComponentTypeID next_component_id() {
     static ComponentTypeID counter = 0;
     return counter++;
 }
 
+/**
+ * @brief Retrieves the unique ComponentTypeID for a specific type T.
+ * @tparam T The component type.
+ * @return The unique ID for type T.
+ */
 template <typename T>
 ComponentTypeID component_id() {
     static ComponentTypeID id = next_component_id();
     return id;
 }
 
-// Type-erased column storage for a single component type within an archetype.
+/**
+ * @brief Type-erased column storage for a single component type within an archetype.
+ *
+ * @details This struct manages the operations (move, destroy, swap, serialize) for a column of components
+ * without knowing the concrete type at compile time. It acts as a vtable and metadata holder
+ * for a contiguous array of components.
+ *
+ * @warning The actual memory buffer (`data`) is NOT owned by this struct. It is typically a pointer
+ * into a larger memory block managed by an `Archetype`.
+ */
 struct ComponentColumn {
+    /** @brief Pointer to the start of the component data array. */
     uint8_t* data = nullptr;
+    /** @brief Size of a single component element in bytes. */
     size_t elem_size = 0;
+    /** @brief Number of active elements in the column. */
     size_t count = 0;
+    /** @brief Allocated capacity of the column (in elements). */
     size_t capacity = 0;
+    /** @brief Alignment requirement of the component type. */
     size_t alignment = 1;
 
     using MoveFunc = void (*)(void* dst, void* src);
@@ -45,14 +72,23 @@ struct ComponentColumn {
     using SerializeFunc = void (*)(const void* elem, std::ostream& out);
     using DeserializeFunc = void (*)(void* elem, std::istream& in);
 
+    /** @brief Function pointer to move-construct an element. */
     MoveFunc move_fn = nullptr;
+    /** @brief Function pointer to destroy (call destructor) an element. */
     DestroyFunc destroy_fn = nullptr;
+    /** @brief Function pointer to swap two elements. */
     SwapFunc swap_fn = nullptr;
+    /** @brief Function pointer to serialize an element. */
     SerializeFunc serialize_fn = nullptr;
+    /** @brief Function pointer to deserialize an element. */
     DeserializeFunc deserialize_fn = nullptr;
 
     ComponentColumn() = default;
 
+    /**
+     * @brief Move constructor.
+     * @details Transfers ownership of metadata. Data pointer is copied, but ownership remains external.
+     */
     ComponentColumn(ComponentColumn&& o) noexcept
         : data(o.data),
           elem_size(o.elem_size),
@@ -69,6 +105,10 @@ struct ComponentColumn {
         o.capacity = 0;
     }
 
+    /**
+     * @brief Move assignment operator.
+     * @details Destroys existing elements via `destroy_all` before taking over new metadata.
+     */
     ComponentColumn& operator=(ComponentColumn&& o) noexcept {
         if (this != &o) {
             destroy_all();
@@ -90,6 +130,10 @@ struct ComponentColumn {
         return *this;
     }
 
+    /**
+     * @brief Destructor.
+     * @details Calls destructors on all active elements but does not free `data`.
+     */
     ~ComponentColumn() {
         destroy_all();
         // data is owned by Archetype's block_ — do NOT free here
@@ -98,12 +142,22 @@ struct ComponentColumn {
     ComponentColumn(const ComponentColumn&) = delete;
     ComponentColumn& operator=(const ComponentColumn&) = delete;
 
+    /**
+     * @brief Pushes a new element into the column via move construction.
+     * @param src Pointer to the source object.
+     * @warning Assumes capacity is sufficient. The caller must ensure space exists.
+     */
     void push_raw(void* src) {
         ECS_ASSERT(count < capacity, "push_raw: column at capacity (archetype should have grown)");
         move_fn(data + count * elem_size, src);
         ++count;
     }
 
+    /**
+     * @brief Removes an element at a specific index using the "swap and pop" idiom.
+     * @details The element at `row` is destroyed, and the last element is moved into its place.
+     * @param row Index of the element to remove.
+     */
     void swap_remove(size_t row) {
         if (row < count - 1) {
             destroy_fn(data + row * elem_size);
@@ -114,8 +168,17 @@ struct ComponentColumn {
         --count;
     }
 
+    /**
+     * @brief Gets a type-erased pointer to the element at the specified row.
+     * @param row Index of the element.
+     * @return void* pointer to the element data.
+     */
     void* get(size_t row) { return data + row * elem_size; }
 
+    /**
+     * @brief Destroys all elements in the column.
+     * @details Resets count to 0. Does not free memory.
+     */
     void destroy_all() {
         if (data && destroy_fn) {
             for (size_t i = 0; i < count; ++i)
@@ -125,6 +188,11 @@ struct ComponentColumn {
     }
 };
 
+/**
+ * @brief Creates a ComponentColumn configured for a specific type T.
+ * @tparam T The component type.
+ * @return A configured ComponentColumn with appropriate lifecycle functions.
+ */
 template <typename T>
 ComponentColumn make_column() {
     ComponentColumn col;
@@ -152,15 +220,25 @@ ComponentColumn make_column() {
     return col;
 }
 
-// Global registry of column factories so we can create columns for types
-// during archetype migration without knowing the concrete type.
+/**
+ * @brief Global registry of column factories so we can create columns for types
+ * during archetype migration without knowing the concrete type.
+ */
 using ColumnFactory = std::function<ComponentColumn()>;
 
+/**
+ * @brief Accesses the global registry mapping component IDs to their column factories.
+ * @return Reference to the registry map.
+ */
 inline std::map<ComponentTypeID, ColumnFactory>& column_factory_registry() {
     static std::map<ComponentTypeID, ColumnFactory> reg;
     return reg;
 }
 
+/**
+ * @brief Ensures a column factory exists for type T.
+ * @tparam T The component type.
+ */
 template <typename T>
 void ensure_column_factory() {
     auto& reg = column_factory_registry();
@@ -174,16 +252,31 @@ void ensure_column_factory() {
 
 // -- Stable name registry for serialization --
 
+/**
+ * @brief Accesses the registry mapping string names to component IDs.
+ * @return Reference to the name-to-ID map.
+ */
 inline std::map<std::string, ComponentTypeID>& name_to_id_registry() {
     static std::map<std::string, ComponentTypeID> reg;
     return reg;
 }
 
+/**
+ * @brief Accesses the registry mapping component IDs to string names.
+ * @return Reference to the ID-to-name map.
+ */
 inline std::map<ComponentTypeID, std::string>& id_to_name_registry() {
     static std::map<ComponentTypeID, std::string> reg;
     return reg;
 }
 
+/**
+ * @brief Registers a component type with a stable name for serialization.
+ * @tparam T The component type.
+ * @param name The unique string name for the component.
+ * @param ser Optional custom serialization function.
+ * @param deser Optional custom deserialization function.
+ */
 template <typename T>
 void register_component(const char* name, ComponentColumn::SerializeFunc ser = nullptr,
                         ComponentColumn::DeserializeFunc deser = nullptr) {
@@ -231,6 +324,12 @@ void register_component(const char* name, ComponentColumn::SerializeFunc ser = n
     };
 }
 
+/**
+ * @brief lookups a component ID by its registered name.
+ * @param name The registered name.
+ * @return The ComponentTypeID.
+ * @warning Asserts if the name is not registered.
+ */
 inline ComponentTypeID component_id_by_name(const std::string& name) {
     auto& n2i = name_to_id_registry();
     auto it = n2i.find(name);
@@ -238,6 +337,12 @@ inline ComponentTypeID component_id_by_name(const std::string& name) {
     return it->second;
 }
 
+/**
+ * @brief Lookups a registered name by component ID.
+ * @param id The component ID.
+ * @return The registered name.
+ * @warning Asserts if the ID is not registered.
+ */
 inline const std::string& component_name(ComponentTypeID id) {
     auto& i2n = id_to_name_registry();
     auto it = i2n.find(id);
@@ -245,6 +350,11 @@ inline const std::string& component_name(ComponentTypeID id) {
     return it->second;
 }
 
+/**
+ * @brief Checks if a component ID has been registered.
+ * @param id The component ID.
+ * @return true if registered, false otherwise.
+ */
 inline bool component_registered(ComponentTypeID id) {
     auto& i2n = id_to_name_registry();
     return i2n.find(id) != i2n.end();

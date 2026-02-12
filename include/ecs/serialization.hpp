@@ -6,6 +6,37 @@
 
 namespace ecs {
 
+/**
+ * @brief Serializes the entire World state to an output stream.
+ *
+ * @details The binary format is:
+ * - Header: "ECS\0" (4 bytes)
+ * - Version: uint32_t (currently 1)
+ * - Archetype Count: uint32_t
+ * - Entity Slot Count: uint32_t
+ * - Per Archetype:
+ *   - Component Count: uint32_t
+ *   - Entity Count: uint32_t
+ *   - Per Component Column:
+ *     - Name Length: uint32_t
+ *     - Name: char[]
+ *     - Element Size: uint32_t
+ *   - Per Column Data:
+ *     - Bytes... (via component's serialize_fn)
+ *   - Entity List:
+ *     - Index: uint32_t
+ *     - Generation: uint32_t
+ * - Entity Table:
+ *   - Slot Count: uint32_t
+ *   - Generations: uint32_t[]
+ *   - Free List Count: uint32_t
+ *   - Free List: uint32_t[]
+ *
+ * @param world The world to serialize.
+ * @param out The output stream.
+ * @warning All components in the world MUST be registered via `register_component` and have
+ * valid serialization functions, or this function will assert/fail.
+ */
 inline void serialize(const World& world, std::ostream& out) {
     // Validate: all component types in all archetypes are registered and serializable
     for (auto& [ts, arch] : world.archetypes_) {
@@ -83,6 +114,17 @@ inline void serialize(const World& world, std::ostream& out) {
     }
 }
 
+/**
+ * @brief Restores the World state from an input stream.
+ *
+ * @details Reconstructs archetypes, entities, and components.
+ * Matches components by name using `component_id_by_name`.
+ *
+ * @param world The target world (must be empty).
+ * @param in The input stream.
+ * @warning The target world must be empty. All components present in the stream
+ * must be registered in the target application.
+ */
 inline void deserialize(World& world, std::istream& in) {
     ECS_ASSERT(world.count() == 0, "deserialize: world must be empty");
 
