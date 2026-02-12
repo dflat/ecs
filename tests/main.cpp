@@ -1224,6 +1224,34 @@ void test_serialize_with_hierarchy() {
     std::printf("  serialize with hierarchy: OK\n");
 }
 
+void test_command_buffer_move_only() {
+    World w;
+    CommandBuffer cb;
+    cb.add(w.create_with(Position{0, 0}), std::make_unique<int>(42));
+    cb.create_with(std::make_unique<int>(99));
+    cb.flush(w);
+    assert(w.count<std::unique_ptr<int>>() == 2);
+
+    // Also test via deferred()
+    Entity e = w.create_with(Position{1, 1});
+    w.deferred().add(e, std::make_unique<int>(7));
+    w.flush_deferred();
+    assert(w.has<std::unique_ptr<int>>(e));
+    assert(*w.get<std::unique_ptr<int>>(e) == 7);
+    std::printf("  command buffer move-only: OK\n");
+}
+
+void test_command_buffer_unflushed_cleanup() {
+    // Verify that unflushed commands with non-trivial types don't leak
+    {
+        CommandBuffer cb;
+        cb.create_with(std::string("a long string to avoid small string optimization entirely"));
+        cb.add(Entity{1, 0}, std::string("another long string to avoid SSO completely here"));
+        // cb goes out of scope without flush — destructor should clean up
+    }
+    std::printf("  command buffer unflushed cleanup: OK\n");
+}
+
 void test_serialize_unregistered_type_asserts() {
     // Use a type that is NOT registered
     struct Unregistered {
@@ -1281,6 +1309,8 @@ int main() {
     test_command_buffer_empty_flush();
     test_command_buffer_nontrivial_types();
     test_command_buffer_destroy_then_add();
+    test_command_buffer_move_only();
+    test_command_buffer_unflushed_cleanup();
     std::printf("  -- Phase 2.2 --\n");
     test_deferred_destroy_during_iteration();
     test_deferred_add_during_iteration();
