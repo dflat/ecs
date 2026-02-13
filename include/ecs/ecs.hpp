@@ -2,8 +2,9 @@
 
 /**
  * @file ecs.hpp
- * @brief Main entry point for the ECS library.
- * @details Includes all core ECS functionality and builtin components/systems.
+ * @brief Main entry point for the ECS library kernel.
+ * @details Includes the core ECS functionality (Entity, Component, World, Systems).
+ * Builtin modules like Transform and Hierarchy must be included separately.
  */
 
 #include "archetype.hpp"
@@ -14,8 +15,3 @@
 #include "serialization.hpp"
 #include "system.hpp"
 #include "world.hpp"
-
-#include "builtin/hierarchy.hpp"
-#include "builtin/hierarchy_ops.hpp"
-#include "builtin/transform.hpp"
-#include "builtin/transform_propagation.hpp"
