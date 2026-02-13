@@ -85,7 +85,7 @@ static void destroy_entity_recursive(ecs::Entity e) {
 static ecs::Entity make_body(float orbit_r, float speed, float radius,
                              uint8_t r, uint8_t g, uint8_t b) {
     return world.create_with(
-        ecs::LocalTransform{ecs::Mat4::translation(orbit_r, 0.0f, 0.0f)},
+        ecs::LocalTransform{{orbit_r, 0.0f, 0.0f}},
         ecs::WorldTransform{}, Renderable{radius, r, g, b},
         Orbital{speed, orbit_r, 0.0f});
 }
@@ -143,7 +143,9 @@ static void orbital_motion(ecs::World& w) {
             orb.angle += orb.speed * dt;
             float x = std::cos(orb.angle) * orb.orbit_radius;
             float z = std::sin(orb.angle) * orb.orbit_radius;
-            lt.matrix = ecs::Mat4::translation(x, 0.0f, z);
+            lt.position.x = x;
+            lt.position.y = 0.0f;
+            lt.position.z = z;
         });
 }
 

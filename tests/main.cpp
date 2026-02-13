@@ -113,16 +113,17 @@ void test_hierarchy_propagation() {
     World w;
 
     // Root at (10, 0, 0)
+    // LocalTransform now stores {pos, rot, scale}
     Entity root =
-        w.create_with(LocalTransform{Mat4::translation(10, 0, 0)}, WorldTransform{}, Children{{}});
+        w.create_with(LocalTransform{{10, 0, 0}}, WorldTransform{}, Children{{}});
 
     // Child at (0, 5, 0) relative to root
-    Entity child = w.create_with(LocalTransform{Mat4::translation(0, 5, 0)}, WorldTransform{},
+    Entity child = w.create_with(LocalTransform{{0, 5, 0}}, WorldTransform{},
                                  Parent{root}, Children{{}});
 
     // Grandchild at (0, 0, 3) relative to child
     Entity grandchild =
-        w.create_with(LocalTransform{Mat4::translation(0, 0, 3)}, WorldTransform{}, Parent{child});
+        w.create_with(LocalTransform{{0, 0, 3}}, WorldTransform{}, Parent{child});
 
     // Wire up children
     w.get<Children>(root).entities.push_back(child);
@@ -866,9 +867,9 @@ void test_set_parent_creates_children() {
 void test_hierarchy_propagation_with_set_parent() {
     World w;
 
-    Entity root = w.create_with(LocalTransform{Mat4::translation(10, 0, 0)}, WorldTransform{});
-    Entity child = w.create_with(LocalTransform{Mat4::translation(0, 5, 0)}, WorldTransform{});
-    Entity grandchild = w.create_with(LocalTransform{Mat4::translation(0, 0, 3)}, WorldTransform{});
+    Entity root = w.create_with(LocalTransform{{10, 0, 0}}, WorldTransform{});
+    Entity child = w.create_with(LocalTransform{{0, 5, 0}}, WorldTransform{});
+    Entity grandchild = w.create_with(LocalTransform{{0, 0, 3}}, WorldTransform{});
 
     set_parent(w, child, root);
     set_parent(w, grandchild, child);

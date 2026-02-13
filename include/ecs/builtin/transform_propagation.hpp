@@ -8,17 +8,15 @@
 namespace ecs {
 
 /**
- * @brief Updates `WorldTransform` components based on `LocalTransform` and hierarchy.
- *
- * @details Performs a Breadth-First Search (BFS) traversal starting from root entities (those with
- * no `Parent`). Computes the world transform by multiplying the parent's world transform
- * with the child's local transform.
- *
- * - Roots: WorldTransform = LocalTransform
- * - Children: WorldTransform = Parent.WorldTransform * LocalTransform
- *
- * @param world The world to update.
- * @note Entities missing either LocalTransform or WorldTransform are skipped.
+ * @brief Propagates LocalTransforms to WorldTransforms through the hierarchy.
+ * @details Performs a Breadth-First Search (BFS) starting from root entities (entities with
+ * LocalTransform but no Parent). For each entity, it computes the WorldTransform by multiplying
+ * the parent's WorldTransform with the entity's LocalTransform matrix (composed from PRS).
+ * 
+ * Roots: WorldTransform = Compose(LocalTransform)
+ * Children: WorldTransform = Parent.WorldTransform * Compose(LocalTransform)
+ * 
+ * @param world The ECS world to process.
  */
 inline void propagate_transforms(World& world) {
     std::queue<Entity> queue;
@@ -26,7 +24,9 @@ inline void propagate_transforms(World& world) {
     // Find roots (entities with transforms but no Parent) and seed the BFS
     world.each<LocalTransform, WorldTransform>(
         World::Exclude<Parent>{}, [&](Entity e, LocalTransform& local, WorldTransform& wt) {
-            wt.matrix = local.matrix;
+            // Root entity: World = Local (composed)
+            wt.matrix = Mat4::compose(local.position, local.rotation, local.scale);
+            
             auto* children = world.try_get<Children>(e);
             if (children) {
                 for (auto child : children->entities)
@@ -49,7 +49,9 @@ inline void propagate_transforms(World& world) {
         if (!parent_wt || !local || !wt)
             continue;
 
-        wt->matrix = Mat4::multiply(parent_wt->matrix, local->matrix);
+        // Child World = Parent World * Local Matrix
+        Mat4 local_mat = Mat4::compose(local->position, local->rotation, local->scale);
+        wt->matrix = Mat4::multiply(parent_wt->matrix, local_mat);
 
         auto* children = world.try_get<Children>(e);
         if (children) {

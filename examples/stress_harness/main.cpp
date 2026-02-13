@@ -182,7 +182,7 @@ static MeshTag::Type rand_mesh() {
 static void spawn_flat(int n) {
     for (int i = 0; i < n; ++i) {
         auto e = world.create_with(
-            ecs::LocalTransform{ecs::Mat4::translation(randf(-50, 50), randf(-50, 50), randf(-50, 50))},
+            ecs::LocalTransform{{randf(-50, 50), randf(-50, 50), randf(-50, 50)}},
             ecs::WorldTransform{},
             Velocity{randf(-5, 5), randf(-5, 5), randf(-5, 5)},
             MeshTag{rand_mesh()});
@@ -194,7 +194,7 @@ static void spawn_flat(int n) {
 static void spawn_wide(int n) {
     for (int i = 0; i < n; ++i) {
         auto e = world.create_with(
-            ecs::LocalTransform{ecs::Mat4::translation(randf(-50, 50), randf(-50, 50), randf(-50, 50))},
+            ecs::LocalTransform{{randf(-50, 50), randf(-50, 50), randf(-50, 50)}},
             ecs::WorldTransform{},
             Velocity{randf(-5, 5), randf(-5, 5), randf(-5, 5)},
             MeshTag{rand_mesh()},
@@ -207,14 +207,14 @@ static void spawn_wide(int n) {
 static void spawn_shallow_tree_unit() {
     // 1 root + 8 children + 32 grandchildren = 41
     auto root = world.create_with(
-        ecs::LocalTransform{ecs::Mat4::translation(randf(-30, 30), randf(-10, 10), randf(-30, 30))},
+        ecs::LocalTransform{{randf(-30, 30), randf(-10, 10), randf(-30, 30)}},
         ecs::WorldTransform{},
         MeshTag{MeshTag::SPHERE});
     root_tracker.push_back(root);
 
     for (int c = 0; c < 8; ++c) {
         auto child = world.create_with(
-            ecs::LocalTransform{},
+            ecs::LocalTransform{}, // Identity
             ecs::WorldTransform{},
             Orbital{randf(0.5f, 3.0f), randf(1.0f, 3.0f), randf(0, 6.28f)},
             MeshTag{MeshTag::CUBE});
@@ -261,14 +261,14 @@ static void rebuild_deep_chain(int n) {
     }
 
     auto prev = world.create_with(
-        ecs::LocalTransform{ecs::Mat4::translation(0, 0, 0)},
+        ecs::LocalTransform{{0, 0, 0}},
         ecs::WorldTransform{},
         MeshTag{MeshTag::SPHERE});
     root_tracker.push_back(prev);
 
     for (int i = 1; i < n; ++i) {
         auto e = world.create_with(
-            ecs::LocalTransform{ecs::Mat4::translation(0, 0.5f, 0)},
+            ecs::LocalTransform{{0, 0.5f, 0}},
             ecs::WorldTransform{},
             MeshTag{static_cast<MeshTag::Type>(i % MeshTag::COUNT)});
         add_child(prev, e);
@@ -310,9 +310,9 @@ static void velocity_update(ecs::World& w) {
     float dt = GetFrameTime();
     w.each<Velocity, ecs::LocalTransform>(
         [&](ecs::Entity, Velocity& vel, ecs::LocalTransform& lt) {
-            lt.matrix.m[12] += vel.vx * dt;
-            lt.matrix.m[13] += vel.vy * dt;
-            lt.matrix.m[14] += vel.vz * dt;
+            lt.position.x += vel.vx * dt;
+            lt.position.y += vel.vy * dt;
+            lt.position.z += vel.vz * dt;
 
             // Wrap at ±50
             auto wrap = [](float& v, float& pos) {
@@ -320,9 +320,9 @@ static void velocity_update(ecs::World& w) {
                 else if (pos < -50.0f) { pos = 50.0f; }
                 (void)v;
             };
-            wrap(vel.vx, lt.matrix.m[12]);
-            wrap(vel.vy, lt.matrix.m[13]);
-            wrap(vel.vz, lt.matrix.m[14]);
+            wrap(vel.vx, lt.position.x);
+            wrap(vel.vy, lt.position.y);
+            wrap(vel.vz, lt.position.z);
         });
 }
 
@@ -334,7 +334,9 @@ static void orbital_motion(ecs::World& w) {
             orb.angle += orb.speed * dt;
             float x = std::cos(orb.angle) * orb.orbit_radius;
             float z = std::sin(orb.angle) * orb.orbit_radius;
-            lt.matrix = ecs::Mat4::translation(x, 0.0f, z);
+            lt.position.x = x;
+            lt.position.y = 0.0f;
+            lt.position.z = z;
         });
 }
 
@@ -343,7 +345,7 @@ static void chain_wiggle(ecs::World& w) {
     double t = GetTime();
     w.each<ecs::LocalTransform, ecs::Parent>(
         [&](ecs::Entity, ecs::LocalTransform& lt, ecs::Parent&) {
-            lt.matrix.m[12] = std::sin(static_cast<float>(t) * 2.0f) * 0.3f;
+            lt.position.x = std::sin(static_cast<float>(t) * 2.0f) * 0.3f;
         });
 }
 
