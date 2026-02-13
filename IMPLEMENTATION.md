@@ -279,7 +279,7 @@ void destroy_recursive(Entity e);  // destroy entity and all descendants
 1. Collect all descendants via BFS.
 2. Destroy in reverse order (leaves first).
 
-**Files:** `world.hpp` or new `include/ecs/builtin/hierarchy_ops.hpp`
+**Files:** `world.hpp` or new `include/ecs/modules/hierarchy_ops.hpp`
 **Verify:** Test: `set_parent` correctly updates both sides. Test: re-parenting
 cleans up old parent's children list. Test: `destroy_recursive` removes entire
 subtree. Test: destroying a leaf doesn't affect siblings.

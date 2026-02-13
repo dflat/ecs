@@ -3,10 +3,10 @@
 #include <csignal>
 #include <cstdio>
 #include <ecs/ecs.hpp>
-#include <ecs/builtin/transform.hpp>
-#include <ecs/builtin/hierarchy.hpp>
-#include <ecs/builtin/hierarchy_ops.hpp>
-#include <ecs/builtin/transform_propagation.hpp>
+#include <ecs/modules/transform.hpp>
+#include <ecs/modules/hierarchy.hpp>
+#include <ecs/modules/hierarchy_ops.hpp>
+#include <ecs/modules/transform_propagation.hpp>
 #include <memory>
 #include <sstream>
 #include <string>
