@@ -3,13 +3,20 @@
 #include <cmath>
 #include "../math.hpp"
 
+// We are committing to GLM as our backend implementation
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
 namespace ecs {
 
 /**
  * @brief A 4x4 floating-point matrix for 3D transformations.
  * @details Stored in column-major order (OpenGL style).
+ * Aligned to 16 bytes to allow for SIMD optimizations in the backing math library.
  */
-struct Mat4 {
+struct alignas(16) Mat4 {
     /** @brief The 16 floats of the matrix. */
     float m[16];
 
@@ -30,16 +37,11 @@ struct Mat4 {
      * @return The result of the multiplication.
      */
     static Mat4 multiply(const Mat4& a, const Mat4& b) {
-        Mat4 r;
-        std::memset(r.m, 0, sizeof(r.m));
-        for (int col = 0; col < 4; ++col) {
-            for (int row = 0; row < 4; ++row) {
-                for (int k = 0; k < 4; ++k) {
-                    r.m[col * 4 + row] += a.m[k * 4 + row] * b.m[col * 4 + k];
-                }
-            }
-        }
-        return r;
+        // Bridge to GLM for optimized multiply (potentially SIMD)
+        const glm::mat4& ga = reinterpret_cast<const glm::mat4&>(a);
+        const glm::mat4& gb = reinterpret_cast<const glm::mat4&>(b);
+        glm::mat4 r = ga * gb;
+        return reinterpret_cast<Mat4&>(r);
     }
 
     /**
@@ -60,42 +62,30 @@ struct Mat4 {
     /**
      * @brief Composes a matrix from position, rotation (quaternion), and scale.
      * @details Computes M = Translation * Rotation * Scale.
+     * Optimized using GLM's vector/matrix operations.
      * @param pos The position vector.
      * @param rot The rotation quaternion.
      * @param scale The scale vector.
      * @return The composed transformation matrix.
      */
     static Mat4 compose(const Vec3& pos, const Quat& rot, const Vec3& scale) {
-        Mat4 m;
-        // 1. Rotation (Quat to Mat3)
-        // https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation#Quaternion-derived_rotation_matrix
-        float x = rot.x, y = rot.y, z = rot.z, w = rot.w;
-        float x2 = x + x, y2 = y + y, z2 = z + z;
-        float xx = x * x2, xy = x * y2, xz = x * z2;
-        float yy = y * y2, yz = y * z2, zz = z * z2;
-        float wx = w * x2, wy = w * y2, wz = w * z2;
+        // Direct cast since layouts are guaranteed by integration/glm.hpp
+        const glm::vec3& g_pos = reinterpret_cast<const glm::vec3&>(pos);
+        const glm::quat& g_rot = reinterpret_cast<const glm::quat&>(rot);
+        const glm::vec3& g_scale = reinterpret_cast<const glm::vec3&>(scale);
 
-        m.m[0] = (1.0f - (yy + zz)) * scale.x;
-        m.m[1] = (xy + wz) * scale.x;
-        m.m[2] = (xz - wy) * scale.x;
-        m.m[3] = 0.0f;
+        // 1. Rotation (Mat3 -> Mat4)
+        glm::mat4 m = glm::mat4_cast(g_rot);
 
-        m.m[4] = (xy - wz) * scale.y;
-        m.m[5] = (1.0f - (xx + zz)) * scale.y;
-        m.m[6] = (yz + wx) * scale.y;
-        m.m[7] = 0.0f;
+        // 2. Scale (Apply to columns 0, 1, 2)
+        m[0] *= g_scale.x;
+        m[1] *= g_scale.y;
+        m[2] *= g_scale.z;
 
-        m.m[8] = (xz + wy) * scale.z;
-        m.m[9] = (yz - wx) * scale.z;
-        m.m[10] = (1.0f - (xx + yy)) * scale.z;
-        m.m[11] = 0.0f;
+        // 3. Position (Column 3)
+        m[3] = glm::vec4(g_pos, 1.0f);
 
-        m.m[12] = pos.x;
-        m.m[13] = pos.y;
-        m.m[14] = pos.z;
-        m.m[15] = 1.0f;
-        
-        return m;
+        return reinterpret_cast<Mat4&>(m);
     }
 
     /** @brief Checks exact equality via memcmp. */
