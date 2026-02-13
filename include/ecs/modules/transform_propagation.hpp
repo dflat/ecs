@@ -1,5 +1,6 @@
 #pragma once
 #include "../world.hpp"
+#include "../integration/glm.hpp"
 #include "hierarchy.hpp"
 #include "transform.hpp"
 
@@ -25,7 +26,7 @@ inline void propagate_transforms(World& world) {
     world.each<LocalTransform, WorldTransform>(
         World::Exclude<Parent>{}, [&](Entity e, LocalTransform& local, WorldTransform& wt) {
             // Root entity: World = Local (composed)
-            wt.matrix = Mat4::compose(local.position, local.rotation, local.scale);
+            wt.matrix = mat4_compose(local.position, local.rotation, local.scale);
             
             auto* children = world.try_get<Children>(e);
             if (children) {
@@ -50,8 +51,8 @@ inline void propagate_transforms(World& world) {
             continue;
 
         // Child World = Parent World * Local Matrix
-        Mat4 local_mat = Mat4::compose(local->position, local->rotation, local->scale);
-        wt->matrix = Mat4::multiply(parent_wt->matrix, local_mat);
+        Mat4 local_mat = mat4_compose(local->position, local->rotation, local->scale);
+        wt->matrix = mat4_multiply(parent_wt->matrix, local_mat);
 
         auto* children = world.try_get<Children>(e);
         if (children) {

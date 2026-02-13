@@ -3,83 +3,61 @@
 #include "../math.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <type_traits>
+#include <cstring>
 
 /**
  * @file glm.hpp
  * @brief GLM Integration Bridge.
- * @details This header provides safe, zero-cost casting between ECS POD types and GLM types.
- * It enforces strict layout compatibility assertions at compile time.
+ * @details This header provides safe, zero-cost casting and high-performance 
+ * math operations (inlined) between ECS POD types and GLM.
  */
 
 // 1. Layout Verification (Compile-time checks)
-static_assert(sizeof(ecs::Vec3) == sizeof(glm::vec3), "ecs::Vec3 size mismatch with glm::vec3");
-static_assert(alignof(ecs::Vec3) == alignof(glm::vec3), "ecs::Vec3 alignment mismatch with glm::vec3");
-static_assert(std::is_standard_layout_v<ecs::Vec3>, "ecs::Vec3 must be standard layout");
-
-static_assert(sizeof(ecs::Quat) == sizeof(glm::quat), "ecs::Quat size mismatch with glm::quat");
-// Note: glm::quat might align differently depending on SIMD settings, but usually matches float[4].
-// If this assertion fails, you must use the copy-based conversion.
+static_assert(sizeof(ecs::Vec3) == sizeof(glm::vec3), "ecs::Vec3 size mismatch");
+static_assert(sizeof(ecs::Quat) == sizeof(glm::quat), "ecs::Quat size mismatch");
+static_assert(sizeof(ecs::Mat4) == sizeof(glm::mat4), "ecs::Mat4 size mismatch");
 
 namespace ecs {
 
-// 2. Zero-Overhead Casting Helpers
-// Using reinterpret_cast is standard practice for this pattern, assuming layouts match.
+// --- Zero-Overhead Casting ---
 
-/**
- * @brief Casts an ECS Vec3 to a GLM vec3 reference.
- * @param v The ECS vector.
- * @return A reference to the vector as a glm::vec3.
- */
-inline glm::vec3& to_glm(Vec3& v) {
-    return reinterpret_cast<glm::vec3&>(v);
+inline const glm::vec3& to_glm(const Vec3& v) { return reinterpret_cast<const glm::vec3&>(v); }
+inline const glm::quat& to_glm(const Quat& q) { return reinterpret_cast<const glm::quat&>(q); }
+inline const glm::mat4& to_glm(const Mat4& m) { return reinterpret_cast<const glm::mat4&>(m); }
+inline glm::mat4& to_glm(Mat4& m) { return reinterpret_cast<glm::mat4&>(m); }
+
+// --- Inlined Math Operations ---
+
+/** @brief Resets matrix to identity. */
+inline void mat4_identity(Mat4& m) {
+    std::memset(m.m, 0, sizeof(m.m));
+    m.m[0] = m.m[5] = m.m[10] = m.m[15] = 1.0f;
 }
 
-/**
- * @brief Casts a const ECS Vec3 to a const GLM vec3 reference.
- * @param v The ECS vector.
- * @return A const reference to the vector as a glm::vec3.
- */
-inline const glm::vec3& to_glm(const Vec3& v) {
-    return reinterpret_cast<const glm::vec3&>(v);
+/** @brief Multiplies two matrices (a * b). Inlined GLM implementation. */
+inline Mat4 mat4_multiply(const Mat4& a, const Mat4& b) {
+    const glm::mat4& ga = to_glm(a);
+    const glm::mat4& gb = to_glm(b);
+    glm::mat4 r = ga * gb;
+    return reinterpret_cast<Mat4&>(r);
 }
 
-/**
- * @brief Casts an ECS Quat to a GLM quat reference.
- * @param q The ECS quaternion.
- * @return A reference to the quaternion as a glm::quat.
- */
-inline glm::quat& to_glm(Quat& q) {
-    return reinterpret_cast<glm::quat&>(q);
-}
+/** @brief Composes a matrix from PRS. Inlined GLM implementation. */
+inline Mat4 mat4_compose(const Vec3& pos, const Quat& rot, const Vec3& scale) {
+    const glm::vec3& g_pos = to_glm(pos);
+    const glm::quat& g_rot = to_glm(rot);
+    const glm::vec3& g_scale = to_glm(scale);
 
-/**
- * @brief Casts a const ECS Quat to a const GLM quat reference.
- * @param q The ECS quaternion.
- * @return A const reference to the quaternion as a glm::quat.
- */
-inline const glm::quat& to_glm(const Quat& q) {
-    return reinterpret_cast<const glm::quat&>(q);
-}
+    // Optimized composition
+    glm::mat4 m = glm::mat4_cast(g_rot);
+    m[0] *= g_scale.x;
+    m[1] *= g_scale.y;
+    m[2] *= g_scale.z;
+    m[3] = glm::vec4(g_pos, 1.0f);
 
-// 3. Assignment Helpers (Copy)
-
-/**
- * @brief Converts a GLM vec3 to an ECS Vec3 by value.
- * @param v The GLM vector.
- * @return The ECS vector.
- */
-inline Vec3 from_glm(const glm::vec3& v) {
-    return Vec3{v.x, v.y, v.z};
-}
-
-/**
- * @brief Converts a GLM quat to an ECS Quat by value.
- * @param q The GLM quaternion.
- * @return The ECS quaternion.
- */
-inline Quat from_glm(const glm::quat& q) {
-    return Quat{q.x, q.y, q.z, q.w};
+    return reinterpret_cast<Mat4&>(m);
 }
 
 } // namespace ecs

@@ -32,4 +32,13 @@ struct Quat {
     float w;
 };
 
+/**
+ * @brief Standard packed 4x4 matrix (16 floats).
+ * @details Stored in column-major order.
+ * Designed to be binary-compatible with GLM, Raylib, and OpenGL.
+ */
+struct alignas(16) Mat4 {
+    float m[16];
+};
+
 } // namespace ecs
