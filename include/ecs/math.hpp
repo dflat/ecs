@@ -3,6 +3,14 @@
 namespace ecs {
 
 /**
+ * @brief Standard packed float2 layout.
+ */
+struct Vec2 {
+    float x;
+    float y;
+};
+
+/**
  * @brief Standard packed float3 layout.
  * @details Matches GLM, Raylib, Unity, Unreal, etc.
  * Designed to be binary-compatible with common math libraries.
