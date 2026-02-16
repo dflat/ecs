@@ -1,7 +1,6 @@
 # ECS Library Specification
 
-**Version:** 0.9
-**Status:** Draft
+**Version:** 1.0
 **Language:** C++17, header-only
 **Dependencies:** None (standard library only)
 
@@ -16,15 +15,12 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 - **Cache-friendly iteration.** Query loops index into contiguous typed arrays. No vtable dispatch, no pointer chasing per-entity.
 - **Zero external dependencies.** C++17 standard library only. No RTTI, no exceptions in core paths.
 - **Minimal API surface.** The `World` class is the single point of contact for all entity/component operations.
-- **Composable.** Builtins (transform, hierarchy) are ordinary components with no special status in the core. Applications can ignore them entirely.
+- **Composable.** Modules (transform, hierarchy) are ordinary components with no special status in the core. Applications can ignore them entirely.
 
-### 1.2 Non-Goals (Current Scope)
+### 1.2 Non-Goals
 
-- Thread safety. All operations assume single-threaded access to a `World`.
-- ~~Serialization.~~ Binary world snapshots implemented in Phase 8 — see §3.10.
-- ~~Reactive/event systems.~~ Basic observers implemented in Phase 4 — see §3.8.
-- Maximum performance at extreme scale (100k+ entities). The current design prioritizes correctness and clarity. ~~Bitset archetype matching~~ is implemented (Phase 7.1). ~~Chunk allocation~~ is implemented (Phase 7.2).
-- ~~Singleton resources.~~ Implemented in Phase 3 — see §3.7.
+- **Thread safety.** All operations assume single-threaded access to a `World`.
+- **Maximum performance at extreme scale.** The current design prioritizes correctness and clarity. Optimization work (bitset matching, chunk allocation, edge cache) is in place but further hot-path tuning is planned.
 
 ---
 
@@ -34,7 +30,7 @@ A standalone, archetype-based Entity Component System. Entities with identical c
 
 A lightweight handle to an entity in the world.
 
-```
+```cpp
 struct Entity {
     uint32_t index;
     uint32_t generation;
@@ -57,7 +53,7 @@ Any C++ type. No base class, no registration macro, no RTTI.
 - No requirement for default-constructibility, copyability, or trivial layout.
 
 **Type identification:**
-```
+```cpp
 template <typename T>
 ComponentTypeID component_id();
 ```
@@ -71,23 +67,10 @@ A unique combination of component types. Identified by a **TypeSet**: a sorted `
 Each archetype owns:
 - One **ComponentColumn** per component type (SoA storage).
 - A parallel `vector<Entity>` tracking which entity occupies each row.
-- A **component bitset** (`std::bitset<256>`) with one bit set per component type in the archetype, used for fast query matching.
+- A **component bitset** (`std::bitset<256>`) with one bit set per component type in the archetype, used for fast query matching. This limits the library to 256 distinct component types.
 - An **edge cache** (`map<ComponentTypeID, ArchetypeEdge>`) for O(1) amortized archetype lookup when adding/removing components.
 
 **Invariant:** For every archetype, all columns and the entity vector have identical length (the archetype's entity count).
-
-### 2.4 ComponentColumn (Type-Erased Storage)
-
-A non-owning view into a region of the archetype's chunk-allocated block. Each column stores elements of a single component type contiguously.
-
-| Property | Value |
-|---|---|
-| Backing memory | Non-owning `uint8_t*` into archetype's block (see §2.3.1) |
-| Element lifecycle | Placement-new via move constructor; explicit destructor calls |
-| Growth policy | Managed by archetype (see §2.3.1) |
-| Deletion policy | Swap-remove: last element is move-constructed over the deleted slot, maintaining density |
-
-**Function pointers** (`MoveFunc`, `DestroyFunc`, `SwapFunc`) are captured at column creation from the concrete type via `make_column<T>()`. This allows type-erased operations without virtual dispatch.
 
 #### 2.3.1 Chunk Allocation
 
@@ -101,16 +84,29 @@ block: [Col0: cap * elem0] [pad16] [Col1: cap * elem1] [pad16] ...
 |---|---|
 | Initial capacity | `max(16, 16384 / row_size)` where `row_size = sum(elem_sizes)` |
 | Growth policy | 2x doubling of the entire block |
-| Allocator calls per grow | 1 (vs N per column previously) |
+| Allocator calls per grow | 1 (`malloc` + `free`) |
 
 The `entities` vector remains a separate `std::vector`.
 
 **Column Factory Registry:**
 A global `map<ComponentTypeID, function<ComponentColumn()>>` is populated by `ensure_column_factory<T>()` on first use of each type. This allows new archetypes to be constructed during migration without compile-time knowledge of the component type at the migration call site.
 
+### 2.4 ComponentColumn (Type-Erased Storage)
+
+A non-owning view into a region of the archetype's chunk-allocated block. Each column stores elements of a single component type contiguously.
+
+| Property | Value |
+|---|---|
+| Backing memory | Non-owning `uint8_t*` into archetype's block |
+| Element lifecycle | Placement-new via move constructor; explicit destructor calls |
+| Growth policy | Managed by archetype (see §2.3.1) |
+| Deletion policy | Swap-remove: last element is move-constructed over the deleted slot, maintaining density |
+
+**Function pointers** (`MoveFunc`, `DestroyFunc`, `SwapFunc`, `SerializeFunc`, `DeserializeFunc`) are captured at column creation from the concrete type via `make_column<T>()`. This allows type-erased operations without virtual dispatch.
+
 ### 2.5 EntityRecord
 
-```
+```cpp
 struct EntityRecord {
     Archetype* archetype;
     size_t row;
@@ -134,7 +130,7 @@ World maintains a parallel array of `EntityRecord` indexed by `Entity::index`. P
 | `destroy` | `void destroy(Entity)` | Remove entity from its archetype via swap-remove. Bump generation. Push index to free-list. |
 | `alive` | `bool alive(Entity) const` | Check handle validity (generation match + archetype assigned). |
 
-**create_with** is the preferred creation path. It computes the TypeSet from the template pack, finds or creates the target archetype, and pushes all components in one shot.
+**create_with** is the preferred creation path. It computes the TypeSet from the template pack, finds or creates the target archetype, and pushes all components in one shot. Using `create()` followed by multiple `add()` calls causes N archetype migrations — avoid this pattern.
 
 **destroy** performs swap-remove: the last entity in the archetype is moved into the destroyed entity's row. The swapped entity's `EntityRecord::row` is updated. This maintains contiguous storage with no gaps.
 
@@ -146,7 +142,7 @@ World maintains a parallel array of `EntityRecord` indexed by `Entity::index`. P
 | `get<T>` | `T& get<T>(Entity)` | Direct reference. **Precondition:** entity is alive and has `T`. |
 | `try_get<T>` | `T* try_get<T>(Entity)` | Returns pointer or `nullptr`. |
 
-All three are O(1): index into `records_` by entity index, then index into the archetype's column by row.
+All three are O(1): index into `records_` by entity index, then look up the archetype's column by component ID.
 
 **Pointer/reference stability:** References returned by `get<T>` and `try_get<T>` are invalidated by any structural change to the same archetype (creation, destruction, or migration of any entity in that archetype). Callers must not hold references across such operations.
 
@@ -191,7 +187,7 @@ template <typename... Ts, typename... Ex, typename Func>
 void each(Exclude<Ex...>, Func&& fn);
 ```
 
-**Matching:** Queries use an internal cache keyed by `(include_types, exclude_types)`. The cache stores a `vector<Archetype*>` of matching archetypes and is invalidated when new archetypes are created (tracked via a generation counter). This makes repeated queries O(1) when the archetype set is stable. When the cache is invalidated, archetype matching uses bitwise AND+compare on a fixed-size `std::bitset<256>` per archetype (one bit per component type ID), avoiding per-component map lookups. This supports up to 256 distinct component types.
+**Matching:** Queries use an internal cache keyed by `(include_types, exclude_types)`. The cache stores a `vector<Archetype*>` of matching archetypes and is invalidated when new archetypes are created (tracked via a generation counter). Archetype matching uses bitwise AND+compare on `std::bitset<256>`.
 
 **Iteration:** Within a matched archetype, retrieves typed pointers to each column's raw buffer and indexes linearly. This is the cache-friendly hot path — no indirection per entity.
 
@@ -206,20 +202,16 @@ Same as `each` but calls `fn(Ts&...)` without the entity handle. Also supports t
 
 ### 3.6 Deferred Commands
 
-During `each()` iteration, structural changes are forbidden. The deferred command system lets users queue operations during iteration and apply them afterward.
+During `each()` iteration, structural changes are forbidden. The `CommandBuffer` lets users queue operations during iteration and apply them afterward.
 
-**World-owned deferred proxy:**
+**World-owned command buffer:**
 
 ```cpp
-World::DeferredProxy deferred();
+CommandBuffer& deferred();
 void flush_deferred();
 ```
 
-`deferred()` returns a lightweight proxy object with the same structural API as World (`destroy`, `add<T>`, `remove<T>`, `create_with<Ts...>`), but all operations are recorded rather than executed. `flush_deferred()` executes all recorded commands in order and clears the buffer. It asserts `!iterating_`.
-
-Commands are executed in recording order. This means ordering matters — e.g., if `destroy(e)` is recorded before `add(e, T{})`, the entity will be dead when the add runs, and the add becomes a no-op.
-
-`create_with` returns `void` (not `Entity`) since the entity does not exist until flush.
+`deferred()` returns the world's internal `CommandBuffer`. `flush_deferred()` executes all recorded commands in order and clears the buffer. It asserts `!iterating_`.
 
 **Standalone CommandBuffer:**
 
@@ -236,7 +228,9 @@ class CommandBuffer {
 
 A standalone command buffer with the same API. Useful when commands need to be accumulated across multiple systems or frames before flushing.
 
-**Implementation:** Both `DeferredProxy` and `CommandBuffer` store commands as `std::function<void(World&)>` lambdas. Component data is kept alive via `std::shared_ptr`. This is simple and correct; performance optimization (custom type-erased storage) is deferred to Phase 7 if profiling warrants it.
+**Implementation:** Commands are stored in a linear byte buffer (`std::vector<uint8_t>`). Component data is placement-new'd inline into the buffer. No per-command heap allocation. Commands are executed in FIFO order during `flush()`. Unflushed commands are properly destroyed in the `CommandBuffer` destructor.
+
+`create_with` returns `void` (not `Entity`) since the entity does not exist until flush.
 
 ### 3.7 Singleton Resources
 
@@ -383,47 +377,67 @@ An ordered list of named `function<void(World&)>`. Systems execute in insertion 
 
 ---
 
-## 5. Builtin Components
+## 5. Modules
 
-These are ordinary components shipped with the library for convenience. They have no special privileges in the core.
+These are ordinary components and free functions shipped with the library for convenience. They have no special privileges in the core. Located in `include/ecs/modules/`.
 
-### 5.1 Transform
+### 5.1 Math Types
+
+Defined in `math.hpp`. Plain data types designed to be binary-compatible with GLM, Raylib, and other common math libraries:
 
 | Type | Fields | Description |
 |---|---|---|
-| `Mat4` | `float m[16]` | Column-major 4x4 matrix. Provides `identity()`, `multiply()`, `translation()`. |
-| `LocalTransform` | `Mat4 matrix` | Transform relative to parent (or world origin if no parent). |
-| `WorldTransform` | `Mat4 matrix` | Computed absolute transform. Written by the propagation system. |
+| `Vec2` | `float x, y` | 2D vector. |
+| `Vec3` | `float x, y, z` | 3D vector. |
+| `Quat` | `float x, y, z, w` | Quaternion (vector part + scalar). |
+| `Mat4` | `float m[16]`, `alignas(16)` | Column-major 4x4 matrix. |
 
-### 5.2 Hierarchy
+### 5.2 Transform
+
+| Type | Fields | Description |
+|---|---|---|
+| `LocalTransform` | `Vec3 position, Quat rotation, Vec3 scale` | PRS transform relative to parent (or world origin if no parent). |
+| `WorldTransform` | `Mat4 matrix` | Computed absolute transform matrix. Written by the propagation system. |
+
+### 5.3 Hierarchy
 
 | Type | Fields | Description |
 |---|---|---|
 | `Parent` | `Entity entity` | Points to parent entity. |
 | `Children` | `vector<Entity> entities` | Lists child entities. |
 
-**Managed hierarchy operations** (free functions in `builtin/hierarchy_ops.hpp`):
+**Managed hierarchy operations** (free functions in `modules/hierarchy_ops.hpp`):
 
 | Function | Signature | Description |
 |---|---|---|
-| `set_parent` | `void set_parent(World&, Entity child, Entity parent)` | Set child's parent, keeping both sides in sync. Handles re-parenting (removes from old parent's Children). Creates Children component on parent if absent. No-op if child or parent is dead. Asserts on self-parenting. |
-| `remove_parent` | `void remove_parent(World&, Entity child)` | Orphan child: remove from parent's Children, remove Parent component. No-op if child is dead or has no parent. |
-| `destroy_recursive` | `void destroy_recursive(World&, Entity root)` | Destroy entity and all descendants via BFS. Destroys leaves first to avoid dangling references. |
+| `set_parent` | `void set_parent(World&, Entity child, Entity parent)` | Set child's parent, keeping both sides in sync. Handles re-parenting. |
+| `remove_parent` | `void remove_parent(World&, Entity child)` | Orphan child: remove from parent's Children, remove Parent component. |
+| `destroy_recursive` | `void destroy_recursive(World&, Entity root)` | Destroy entity and all descendants via BFS. |
 
 These functions are the recommended way to manage hierarchy. Direct manipulation of `Parent` and `Children` is still possible but requires the application to maintain consistency.
 
-### 5.3 Transform Propagation
+### 5.4 Transform Propagation
 
 ```cpp
 void propagate_transforms(World& world);
 ```
 
 BFS traversal:
-1. Query entities with `LocalTransform` + `WorldTransform` but no `Parent` → roots.
-2. For each root: set `WorldTransform = LocalTransform`, enqueue its children.
-3. For each child: `WorldTransform = parent.WorldTransform * child.LocalTransform`, enqueue its children.
+1. Query entities with `LocalTransform` + `WorldTransform` but no `Parent` (roots).
+2. For each root: compose PRS into `WorldTransform` matrix, enqueue children.
+3. For each child: `WorldTransform = parent.WorldTransform * compose(child.LocalTransform)`, enqueue children.
 
-Uses `try_get<T>()` per entity during BFS (O(1) each). Not maximally cache-friendly for the BFS portion, but adequate for expected entity counts (hundreds, not millions).
+Composition from PRS to matrix uses the GLM integration bridge (`integration/glm.hpp`), which provides zero-overhead `reinterpret_cast` between ECS math types and GLM types.
+
+### 5.5 GLM Integration
+
+Located in `integration/glm.hpp`. Provides:
+
+- **Compile-time layout assertions** (`static_assert` on `sizeof` match).
+- **Zero-copy casting:** `to_glm(const Vec3&)` returns `const glm::vec3&` via `reinterpret_cast`.
+- **Math operations:** `mat4_identity()`, `mat4_multiply()`, `mat4_compose()` implemented via inlined GLM calls.
+
+This is the only file in the library that has an external dependency (GLM). It is an optional integration header — applications that don't use GLM don't need to include it.
 
 ---
 
@@ -431,7 +445,7 @@ Uses `try_get<T>()` per entity during BFS (O(1) each). Not maximally cache-frien
 
 These must hold at all times outside of an in-progress structural operation:
 
-1. **Entity array ↔ column parity.** Within an archetype, `entities.size() == columns[cid].count` for all columns.
+1. **Entity array - column parity.** Within an archetype, `entities.size() == columns[cid].count` for all columns.
 2. **Record consistency.** For every live entity `e`, `records_[e.index].archetype->entities[records_[e.index].row] == e`.
 3. **Generation monotonicity.** `generations_[i]` never decreases for any index `i`.
 4. **No dangling archetype pointers.** Archetypes are owned by the world (`unique_ptr`) and are never destroyed during the world's lifetime. Edge cache pointers remain valid.
@@ -446,64 +460,41 @@ These are accepted constraints of the current implementation, not bugs.
 
 1. **Not thread-safe.** No synchronization on any data structure. A single World must be accessed from one thread at a time.
 2. **No structural changes during iteration.** `each()` holds raw pointers into column buffers. Direct structural changes during a callback trigger a debug assertion. Use `world.deferred()` to queue changes safely (see §3.6).
-3. **Component type IDs are not stable across builds.** IDs are assigned by call order, which can vary with compiler, link order, or code changes. Use `register_component<T>(name)` to assign stable string names for serialization (see §3.10).
+3. **Component type IDs are not stable across builds.** IDs are assigned by call order, which can vary with compiler, link order, or code changes. Use `register_component<T>(name)` for stable identity (see §3.10).
 4. **Global column factory registry.** The factory map is a process-wide singleton. Multiple `World` instances share it (harmless in practice, but not isolated).
-5. **Migration cost.** Adding/removing a component moves all of an entity's components to a new archetype. Frequent single-component changes on entities with many components are expensive.
-6. **Hierarchy consistency requires helper functions.** Use `set_parent`, `remove_parent`, and `destroy_recursive` (from `builtin/hierarchy_ops.hpp`) for automatic bidirectional consistency. Direct manipulation of `Parent` and `Children` is possible but the application must keep both sides in sync.
-7. **Deferred command overhead.** Each deferred command allocates a `std::function` + `std::shared_ptr` for component data. Adequate for typical use; custom type-erased storage is a potential Phase 7 optimization.
+5. **Migration cost.** Adding/removing a component moves all of an entity's components to a new archetype. Frequent single-component changes on entities with many components are expensive. Prefer `create_with<>()` over `create()` + multiple `add()` calls.
+6. **Hierarchy consistency requires helper functions.** Use `set_parent`, `remove_parent`, and `destroy_recursive` for automatic bidirectional consistency. Direct manipulation of `Parent` and `Children` is possible but the application must keep both sides in sync.
+7. **256 component type limit.** The bitset-based query matching uses `std::bitset<256>`, capping the number of distinct component types at 256.
 
 ---
 
-## 8. Roadmap
-
-Planned features, roughly ordered by priority. Each item should get its own spec section before implementation. See `IMPLEMENTATION.md` for detailed phased plan and progress tracking.
-
-### 8.0 Completed
-
-- ~~Deferred command buffer~~ — §3.6. Queue structural changes during iteration, flush after.
-- ~~Query caching~~ — §3.5. Cached per query signature, invalidated on archetype creation.
-- ~~Exclude filters~~ — §3.5. `each<A, B>(Exclude<C>{}, fn)`.
-- ~~Utility queries~~ — §3.4. `count()`, `count<Ts...>()`, `single<Ts...>()`.
-- ~~Debug-mode invariant checks~~ — `ECS_ASSERT` guards on all structural operations.
-- ~~Sanitizer build~~ — `cmake -DECS_SANITIZE=ON`.
-- ~~Singleton resources~~ — §3.7. Typed global data on World, independent of entities.
-- ~~Observers / hooks~~ — §3.8. Component lifecycle callbacks (`on_add`, `on_remove`).
-- ~~Automatic hierarchy consistency~~ — §5.2. Managed operations (`set_parent`, `remove_parent`, `destroy_recursive`).
-- ~~Archetype sorting~~ — §3.9. Sort entities within archetypes by a component comparator.
-- ~~Bitset archetype matching~~ — §3.5. Fixed-size bitset per archetype for fast query matching.
-- ~~Serialization~~ — §3.10. Stable type registration and binary world snapshots.
-- ~~Prefabs~~ — §3.11. Reusable entity templates with default component values.
-
-### 8.2 Long-Term
-
-- **Parallel iteration.** Split archetype iteration across threads. Requires read/write access declarations per system and a dependency-aware scheduler.
-- **Scripting bridge.** Type-erased component access for dynamic languages (Python, Lua). Likely via string-keyed component lookup and void* accessors.
-
----
-
-## 9. File Map
+## 8. File Map
 
 ```
 ecs/
 ├── CMakeLists.txt                              Build: header-only INTERFACE lib + test exe
 ├── SPEC.md                                     This document
-├── IMPLEMENTATION.md                           Phased build plan and progress tracker
+├── IMPLEMENTATION.md                           Phase progress tracker
 ├── CLAUDE.md                                   Claude Code guidelines
+├── docs/rfcs/                                  RFC pipeline (design docs)
 ├── include/ecs/
-│   ├── ecs.hpp                                 Convenience include-all
+│   ├── ecs.hpp                                 Convenience include-all (core only)
 │   ├── entity.hpp                              Entity, INVALID_ENTITY, EntityHash
 │   ├── component.hpp                           ComponentTypeID, component_id<T>(), ComponentColumn, column factory
 │   ├── archetype.hpp                           TypeSet, TypeSetHash, Archetype, ArchetypeEdge
-│   ├── world.hpp                               World (main API), EntityRecord, DeferredProxy, query cache
+│   ├── world.hpp                               World (main API), EntityRecord, query cache
+│   ├── command_buffer.hpp                      CommandBuffer (deferred command queue)
 │   ├── serialization.hpp                       serialize(), deserialize() (binary world snapshots)
-│   ├── command_buffer.hpp                      CommandBuffer (standalone deferred command queue)
 │   ├── prefab.hpp                              Prefab, instantiate() (reusable entity templates)
-│   ├── system.hpp                              SystemRegistry (auto-flushes deferred commands)
-│   └── builtin/
-│       ├── transform.hpp                       Mat4, LocalTransform, WorldTransform
-│       ├── hierarchy.hpp                       Parent, Children
-│       ├── hierarchy_ops.hpp                   set_parent(), remove_parent(), destroy_recursive()
-│       └── transform_propagation.hpp           propagate_transforms()
+│   ├── system.hpp                              SystemRegistry
+│   ├── math.hpp                                Vec2, Vec3, Quat, Mat4 (POD math types)
+│   ├── modules/
+│   │   ├── transform.hpp                       LocalTransform, WorldTransform
+│   │   ├── hierarchy.hpp                       Parent, Children
+│   │   ├── hierarchy_ops.hpp                   set_parent(), remove_parent(), destroy_recursive()
+│   │   └── transform_propagation.hpp           propagate_transforms()
+│   └── integration/
+│       └── glm.hpp                             GLM bridge (zero-copy casting, math ops)
 ├── tests/
 │   └── main.cpp                                Test suite
 └── examples/

@@ -22,15 +22,20 @@ Zero warnings required (`-Wall -Wextra -Wpedantic`).
 
 ## Development Workflow
 
-1. Check `IMPLEMENTATION.md` progress section to know where we are.
-2. Work on one sub-item at a time (e.g., "0.1", "1.2"). Mark it `[~]` when
-   starting, `[x]` when done.
-3. Each sub-item must compile clean, pass all tests, and be committed before
-   moving to the next.
-4. When a sub-item adds new functionality, it must include tests in
-   `tests/main.cpp`.
-5. When a sub-item changes behavior covered by SPEC.md, update the spec to
-   match. The spec is the source of truth — keep it accurate.
+All feature work and architectural changes are planned via RFCs in
+`docs/rfcs/`. See `docs/rfcs/README.md` for the pipeline and index.
+
+1. **Plan:** Draft an RFC from `docs/rfcs/_TEMPLATE.md` into `00-proposals/`.
+2. **Activate:** Move the RFC to `01-active/` when implementation begins.
+3. **Implement:** Work incrementally. Each commit must compile clean, pass all
+   tests, and maintain zero warnings.
+4. **Test:** New functionality must include tests in `tests/main.cpp`.
+5. **Document:** When a change affects behavior covered by `SPEC.md`, update
+   the spec to match. The spec is the source of truth — keep it accurate.
+6. **Complete:** Move the RFC to `02-implemented/` and update the index.
+
+`IMPLEMENTATION.md` tracks phase-level progress (what's done vs. planned).
+RFCs describe the *why* and *how* of each change in detail.
 
 ## Code Style
 
@@ -70,7 +75,7 @@ Follow the conventions established in the existing code:
 
 ## What Not To Do
 
-- Don't add features not in `IMPLEMENTATION.md` without discussing first.
+- Don't add features without an RFC in `docs/rfcs/`.
 - Don't refactor working code unless the current task requires it.
 - Don't add dependencies.
 - Don't break existing tests to make new ones pass.
