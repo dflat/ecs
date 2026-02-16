@@ -186,7 +186,7 @@ inline void deserialize(World& world, std::istream& in) {
         // However, the source world and dest world may have different column
         // orders if component IDs differ across builds. So we use metas order.
         for (uint32_t c = 0; c < component_count; ++c) {
-            auto& col = arch->columns.at(metas[c].id);
+            auto& col = *arch->find_column(metas[c].id);
             ECS_ASSERT(col.deserialize_fn != nullptr,
                        "deserialize: component type has no deserialize function");
             ECS_ASSERT(col.elem_size == metas[c].elem_size, "deserialize: component size mismatch");

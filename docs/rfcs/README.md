@@ -14,6 +14,7 @@ architectural changes for the ECS library. Each RFC moves through a pipeline:
 | ID | Title | Status | Path |
 |----|-------|--------|------|
 | 0000 | Library Baseline | Baseline/Implemented | [02-implemented/0000-library-baseline.md](02-implemented/0000-library-baseline.md) |
+| 0001 | Hot-Path Performance | Active | [01-active/0001-hot-path-performance.md](01-active/0001-hot-path-performance.md) |
 
 ## Workflow
 

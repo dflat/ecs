@@ -6,6 +6,7 @@
 #include "prefab.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <functional>
 #include <iosfwd>
@@ -33,7 +34,8 @@ struct EntityRecord {
  * - Managing the storage of components via Archetypes.
  * - Executing queries over entities with specific component signatures.
  * - Managing global "singleton" Resources.
- * - Handling structural changes (adding/removing components) by migrating entities between archetypes.
+ * - Handling structural changes (adding/removing components) by migrating entities between
+ * archetypes.
  * - Registering and invoking lifecycle hooks (observers).
  *
  * It is not thread-safe for write operations.
@@ -42,7 +44,8 @@ class World {
 public:
     /**
      * @brief Constructs a new World.
-     * @details Initializes the entity index generation array. Index 0 is reserved for INVALID_ENTITY.
+     * @details Initializes the entity index generation array. Index 0 is reserved for
+     * INVALID_ENTITY.
      */
     World() {
         // Reserve index 0 so INVALID_ENTITY (index=0, gen=0) is never a live entity.
@@ -71,7 +74,7 @@ public:
      * @warning Asserts if called during query iteration (`each`).
      */
     Entity create() {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         uint32_t idx;
         if (!free_list_.empty()) {
             idx = free_list_.back();
@@ -101,7 +104,7 @@ public:
      */
     template <typename... Ts>
     Entity create_with(Ts&&... components) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         // Ensure column factories are registered for all types
         (ensure_column_factory<std::decay_t<Ts>>(), ...);
 
@@ -130,7 +133,7 @@ public:
 
         // Fire on_add hooks after record is set (so get<T>(e) works in hooks)
         (fire_hooks(on_add_hooks_, component_id<std::decay_t<Ts>>(), e,
-                    arch->columns.at(component_id<std::decay_t<Ts>>()).get(row)),
+                    arch->find_column(component_id<std::decay_t<Ts>>())->get(row)),
          ...);
 
         return e;
@@ -145,7 +148,7 @@ public:
      * @warning Asserts if called during query iteration.
      */
     void destroy(Entity e) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         if (!alive(e))
             return;
         auto& rec = records_[e.index];
@@ -163,6 +166,46 @@ public:
         rec.row = 0;
         generations_[e.index]++;
         free_list_.push_back(e.index);
+    }
+
+    /**
+     * @brief Destroys all entities that have component T.
+     * @tparam T The component type to match.
+     * @return The number of entities destroyed.
+     * @warning Asserts if called during query iteration.
+     */
+    template <typename T>
+    size_t destroy_all() {
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
+        ComponentTypeID cid = component_id<T>();
+        size_t destroyed = 0;
+
+        // Collect matching archetypes (can't iterate archetypes_ while modifying entities)
+        std::vector<Archetype*> matches;
+        for (auto& [ts, arch] : archetypes_) {
+            if (arch->has_component(cid))
+                matches.push_back(arch.get());
+        }
+
+        for (auto* arch : matches) {
+            // Destroy back-to-front to avoid swap-remove invalidation
+            while (arch->count() > 0) {
+                size_t row = arch->count() - 1;
+                Entity e = arch->entities[row];
+
+                for (auto& [col_cid, col] : arch->columns)
+                    fire_hooks(on_remove_hooks_, col_cid, e, col.get(row));
+
+                arch->swap_remove(row);
+                records_[e.index].archetype = nullptr;
+                records_[e.index].row = 0;
+                generations_[e.index]++;
+                free_list_.push_back(e.index);
+                ++destroyed;
+            }
+        }
+
+        return destroyed;
     }
 
     /**
@@ -239,7 +282,7 @@ public:
      * @warning Asserts if called during query iteration.
      */
     void flush_deferred() {
-        ECS_ASSERT(!iterating_, "flush during iteration");
+        ECS_ASSERT(iterating_ == 0, "flush during iteration");
         deferred_commands_.flush(*this);
     }
 
@@ -371,8 +414,8 @@ public:
         ECS_ASSERT(alive(e), "get<T> on dead entity");
         ECS_ASSERT(has<T>(e), "get<T> on entity missing component");
         auto& rec = records_[e.index];
-        auto& col = rec.archetype->columns.at(component_id<T>());
-        return *static_cast<T*>(col.get(rec.row));
+        auto* col = rec.archetype->find_column(component_id<T>());
+        return *static_cast<T*>(col->get(rec.row));
     }
 
     /**
@@ -401,7 +444,7 @@ public:
      */
     template <typename T>
     void add(Entity e, T&& component) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         if (!alive(e))
             return;
         ensure_column_factory<std::decay_t<T>>();
@@ -411,8 +454,8 @@ public:
         Archetype* old_arch = rec.archetype;
         if (old_arch->has_component(cid)) {
             // Already has it, just overwrite
-            auto& col = old_arch->columns.at(cid);
-            T* ptr = static_cast<T*>(col.get(rec.row));
+            auto* col = old_arch->find_column(cid);
+            T* ptr = static_cast<T*>(col->get(rec.row));
             *ptr = std::forward<T>(component);
             return;
         }
@@ -421,12 +464,12 @@ public:
         migrate_entity(e, old_arch, new_arch, rec.row);
 
         // Push the new component
-        auto& col = new_arch->columns.at(cid);
+        auto* col = new_arch->find_column(cid);
         std::decay_t<T> tmp = std::forward<T>(component);
-        col.push_raw(&tmp);
+        col->push_raw(&tmp);
 
         // Fire on_add after data is in place and record is updated
-        fire_hooks(on_add_hooks_, cid, e, new_arch->columns.at(cid).get(records_[e.index].row));
+        fire_hooks(on_add_hooks_, cid, e, new_arch->find_column(cid)->get(records_[e.index].row));
     }
 
     // -- Remove component (archetype migration) --
@@ -435,12 +478,13 @@ public:
      * @brief Removes a component from an entity.
      * @tparam T The component type.
      * @param e The entity.
-     * @details Migrates the entity to an archetype without T. If the entity doesn't have T, does nothing.
+     * @details Migrates the entity to an archetype without T. If the entity doesn't have T, does
+     * nothing.
      * @warning Asserts if called during query iteration.
      */
     template <typename T>
     void remove(Entity e) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         if (!alive(e))
             return;
         ComponentTypeID cid = component_id<T>();
@@ -454,7 +498,7 @@ public:
         size_t old_row = rec.row;
 
         // Fire on_remove before data is destroyed
-        fire_hooks(on_remove_hooks_, cid, e, old_arch->columns.at(cid).get(old_row));
+        fire_hooks(on_remove_hooks_, cid, e, old_arch->find_column(cid)->get(old_row));
 
         migrate_entity_removing(e, old_arch, new_arch, old_row, cid);
     }
@@ -473,10 +517,10 @@ public:
      */
     template <typename... Ts, typename Func>
     void each(Func&& fn) {
-        iterating_ = true;
+        ++iterating_;
         struct Guard {
-            bool& flag;
-            ~Guard() { flag = false; }
+            int& count;
+            ~Guard() { --count; }
         } guard{iterating_};
 
         ComponentTypeID ids[] = {component_id<Ts>()...};
@@ -484,8 +528,8 @@ public:
             size_t n = arch->count();
             if (n == 0)
                 continue;
-            auto ptrs = std::make_tuple(
-                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
+            auto ptrs = std::make_tuple(static_cast<Ts*>(
+                static_cast<void*>(arch->find_column(component_id<Ts>())->data))...);
             for (size_t i = 0; i < n; ++i)
                 fn(arch->entities[i], std::get<Ts*>(ptrs)[i]...);
         }
@@ -499,10 +543,10 @@ public:
      */
     template <typename... Ts, typename Func>
     void each_no_entity(Func&& fn) {
-        iterating_ = true;
+        ++iterating_;
         struct Guard {
-            bool& flag;
-            ~Guard() { flag = false; }
+            int& count;
+            ~Guard() { --count; }
         } guard{iterating_};
 
         ComponentTypeID ids[] = {component_id<Ts>()...};
@@ -510,8 +554,8 @@ public:
             size_t n = arch->count();
             if (n == 0)
                 continue;
-            auto ptrs = std::make_tuple(
-                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
+            auto ptrs = std::make_tuple(static_cast<Ts*>(
+                static_cast<void*>(arch->find_column(component_id<Ts>())->data))...);
             for (size_t i = 0; i < n; ++i)
                 fn(std::get<Ts*>(ptrs)[i]...);
         }
@@ -528,10 +572,10 @@ public:
      */
     template <typename... Ts, typename... Ex, typename Func>
     void each(Exclude<Ex...>, Func&& fn) {
-        iterating_ = true;
+        ++iterating_;
         struct Guard {
-            bool& flag;
-            ~Guard() { flag = false; }
+            int& count;
+            ~Guard() { --count; }
         } guard{iterating_};
 
         ComponentTypeID include_ids[] = {component_id<Ts>()...};
@@ -540,8 +584,8 @@ public:
             size_t n = arch->count();
             if (n == 0)
                 continue;
-            auto ptrs = std::make_tuple(
-                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
+            auto ptrs = std::make_tuple(static_cast<Ts*>(
+                static_cast<void*>(arch->find_column(component_id<Ts>())->data))...);
             for (size_t i = 0; i < n; ++i)
                 fn(arch->entities[i], std::get<Ts*>(ptrs)[i]...);
         }
@@ -556,10 +600,10 @@ public:
      */
     template <typename... Ts, typename... Ex, typename Func>
     void each_no_entity(Exclude<Ex...>, Func&& fn) {
-        iterating_ = true;
+        ++iterating_;
         struct Guard {
-            bool& flag;
-            ~Guard() { flag = false; }
+            int& count;
+            ~Guard() { --count; }
         } guard{iterating_};
 
         ComponentTypeID include_ids[] = {component_id<Ts>()...};
@@ -568,8 +612,8 @@ public:
             size_t n = arch->count();
             if (n == 0)
                 continue;
-            auto ptrs = std::make_tuple(
-                static_cast<Ts*>(static_cast<void*>(arch->columns.at(component_id<Ts>()).data))...);
+            auto ptrs = std::make_tuple(static_cast<Ts*>(
+                static_cast<void*>(arch->find_column(component_id<Ts>())->data))...);
             for (size_t i = 0; i < n; ++i)
                 fn(std::get<Ts*>(ptrs)[i]...);
         }
@@ -588,7 +632,7 @@ public:
      */
     template <typename T, typename Compare>
     void sort(Compare&& cmp) {
-        ECS_ASSERT(!iterating_, "sort during iteration");
+        ECS_ASSERT(iterating_ == 0, "sort during iteration");
         ComponentTypeID cid = component_id<T>();
 
         for (auto& [ts, arch] : archetypes_) {
@@ -603,7 +647,7 @@ public:
             std::iota(perm.begin(), perm.end(), size_t(0));
 
             // Sort indices by comparing T column elements
-            auto& sort_col = arch->columns.at(cid);
+            auto& sort_col = *arch->find_column(cid);
             uint8_t* sort_data = sort_col.data;
             size_t sort_elem = sort_col.elem_size;
             std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
@@ -675,7 +719,7 @@ private:
     std::vector<uint32_t> free_list_;
     std::unordered_map<TypeSet, std::unique_ptr<Archetype>, TypeSetHash> archetypes_;
     std::unordered_map<ComponentTypeID, ErasedResource> resources_;
-    bool iterating_ = false;
+    int iterating_ = 0;
     CommandBuffer deferred_commands_;
 
     // -- Observer hooks --
@@ -696,17 +740,49 @@ private:
     }
 
     // -- Query cache --
+    static constexpr size_t MAX_QUERY_TERMS = 16;
+
     struct QueryKey {
-        TypeSet include_ids;
-        TypeSet exclude_ids;
+        std::array<ComponentTypeID, MAX_QUERY_TERMS> include_ids{};
+        std::array<ComponentTypeID, MAX_QUERY_TERMS> exclude_ids{};
+        uint8_t n_include = 0;
+        uint8_t n_exclude = 0;
+
+        QueryKey() = default;
+        QueryKey(const ComponentTypeID* inc, size_t ni, const ComponentTypeID* exc, size_t ne)
+            : n_include(static_cast<uint8_t>(ni)), n_exclude(static_cast<uint8_t>(ne)) {
+            ECS_ASSERT(ni <= MAX_QUERY_TERMS, "query exceeds max include terms");
+            ECS_ASSERT(ne <= MAX_QUERY_TERMS, "query exceeds max exclude terms");
+            for (size_t i = 0; i < ni; ++i)
+                include_ids[i] = inc[i];
+            for (size_t i = 0; i < ne; ++i)
+                exclude_ids[i] = exc[i];
+        }
+
         bool operator==(const QueryKey& other) const {
-            return include_ids == other.include_ids && exclude_ids == other.exclude_ids;
+            if (n_include != other.n_include || n_exclude != other.n_exclude)
+                return false;
+            for (uint8_t i = 0; i < n_include; ++i)
+                if (include_ids[i] != other.include_ids[i])
+                    return false;
+            for (uint8_t i = 0; i < n_exclude; ++i)
+                if (exclude_ids[i] != other.exclude_ids[i])
+                    return false;
+            return true;
         }
     };
+
     struct QueryKeyHash {
         size_t operator()(const QueryKey& k) const {
-            TypeSetHash h;
-            return h(k.include_ids) ^ (h(k.exclude_ids) * 31);
+            size_t h = k.n_include;
+            for (uint8_t i = 0; i < k.n_include; ++i)
+                h ^= std::hash<ComponentTypeID>{}(k.include_ids[i]) + 0x9e3779b9 + (h << 6) +
+                     (h >> 2);
+            h ^= k.n_exclude * 31;
+            for (uint8_t i = 0; i < k.n_exclude; ++i)
+                h ^= std::hash<ComponentTypeID>{}(k.exclude_ids[i]) + 0x9e3779b9 + (h << 6) +
+                     (h >> 2);
+            return h;
         }
     };
     struct QueryCacheEntry {
@@ -718,7 +794,7 @@ private:
 
     const std::vector<Archetype*>& cached_query(const ComponentTypeID* include, size_t n_include,
                                                 const ComponentTypeID* exclude, size_t n_exclude) {
-        QueryKey key{TypeSet(include, include + n_include), TypeSet(exclude, exclude + n_exclude)};
+        QueryKey key(include, n_include, exclude, n_exclude);
         auto& entry = query_cache_[key];
         if (entry.generation != archetype_generation_) {
             entry.archetypes.clear();
@@ -750,10 +826,12 @@ private:
         auto arch = std::make_unique<Archetype>();
         arch->type_set = ts;
         auto& factory_reg = column_factory_registry();
+        arch->columns.reserve(ts.size());
         for (auto cid : ts) {
-            arch->columns.emplace(cid, factory_reg.at(cid)());
+            arch->columns.emplace_back(cid, factory_reg.at(cid)());
             arch->component_bits.set(cid);
         }
+        // ts is already sorted, so columns are in sorted order
         Archetype* ptr = arch.get();
         archetypes_.emplace(ts, std::move(arch));
         ++archetype_generation_;
@@ -761,22 +839,22 @@ private:
     }
 
     Archetype* find_add_target(Archetype* src, ComponentTypeID cid) {
-        auto edge_it = src->edges.find(cid);
-        if (edge_it != src->edges.end() && edge_it->second.add_target)
-            return edge_it->second.add_target;
+        auto* edge = src->find_edge(cid);
+        if (edge && edge->add_target)
+            return edge->add_target;
 
         TypeSet new_ts = src->type_set;
         new_ts.push_back(cid);
         std::sort(new_ts.begin(), new_ts.end());
         Archetype* target = get_or_create_archetype(new_ts);
-        src->edges[cid].add_target = target;
+        src->edge_for(cid).add_target = target;
         return target;
     }
 
     Archetype* find_remove_target(Archetype* src, ComponentTypeID cid) {
-        auto edge_it = src->edges.find(cid);
-        if (edge_it != src->edges.end() && edge_it->second.remove_target)
-            return edge_it->second.remove_target;
+        auto* edge = src->find_edge(cid);
+        if (edge && edge->remove_target)
+            return edge->remove_target;
 
         TypeSet new_ts;
         for (auto id : src->type_set) {
@@ -784,44 +862,44 @@ private:
                 new_ts.push_back(id);
         }
         Archetype* target = get_or_create_archetype(new_ts);
-        src->edges[cid].remove_target = target;
+        src->edge_for(cid).remove_target = target;
         return target;
     }
 
     template <typename T>
     void push_component_to_archetype(Archetype* arch, T&& comp) {
-        auto& col = arch->columns.at(component_id<std::decay_t<T>>());
+        auto* col = arch->find_column(component_id<std::decay_t<T>>());
         std::decay_t<T> tmp = std::forward<T>(comp);
-        col.push_raw(&tmp);
+        col->push_raw(&tmp);
     }
 
     // Type-erased add: migrates entity and moves raw component data into the new archetype.
     void add_raw(Entity e, ComponentTypeID cid, void* data, ComponentColumn::MoveFunc move_fn) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         if (!alive(e))
             return;
         auto& rec = records_[e.index];
         Archetype* old_arch = rec.archetype;
         if (old_arch->has_component(cid)) {
             // Already has it — overwrite via move
-            auto& col = old_arch->columns.at(cid);
-            col.destroy_fn(col.get(rec.row));
-            move_fn(col.get(rec.row), data);
+            auto* col = old_arch->find_column(cid);
+            col->destroy_fn(col->get(rec.row));
+            move_fn(col->get(rec.row), data);
             return;
         }
 
         Archetype* new_arch = find_add_target(old_arch, cid);
         migrate_entity(e, old_arch, new_arch, rec.row);
 
-        auto& col = new_arch->columns.at(cid);
-        col.push_raw(data);
+        auto* col = new_arch->find_column(cid);
+        col->push_raw(data);
 
-        fire_hooks(on_add_hooks_, cid, e, new_arch->columns.at(cid).get(records_[e.index].row));
+        fire_hooks(on_add_hooks_, cid, e, new_arch->find_column(cid)->get(records_[e.index].row));
     }
 
     // Type-erased remove component.
     void remove_raw(Entity e, ComponentTypeID cid) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         if (!alive(e))
             return;
         auto& rec = records_[e.index];
@@ -832,14 +910,14 @@ private:
         Archetype* new_arch = find_remove_target(old_arch, cid);
         size_t old_row = rec.row;
 
-        fire_hooks(on_remove_hooks_, cid, e, old_arch->columns.at(cid).get(old_row));
+        fire_hooks(on_remove_hooks_, cid, e, old_arch->find_column(cid)->get(old_row));
         migrate_entity_removing(e, old_arch, new_arch, old_row, cid);
     }
 
     // Type-erased create_with: creates entity with N components given as parallel arrays.
     Entity create_with_raw(ComponentTypeID* ids, void** data, ComponentColumn::MoveFunc* /*moves*/,
                            size_t count) {
-        ECS_ASSERT(!iterating_, "structural change during iteration");
+        ECS_ASSERT(iterating_ == 0, "structural change during iteration");
         TypeSet ts(ids, ids + count);
         std::sort(ts.begin(), ts.end());
         Archetype* arch = get_or_create_archetype(ts);
@@ -859,15 +937,15 @@ private:
         size_t row = arch->count();
         arch->push_entity(e);
         for (size_t i = 0; i < count; ++i) {
-            auto& col = arch->columns.at(ids[i]);
-            col.push_raw(data[i]);
+            auto* col = arch->find_column(ids[i]);
+            col->push_raw(data[i]);
         }
         arch->assert_parity();
 
         records_[idx] = {arch, row};
 
         for (size_t i = 0; i < count; ++i) {
-            fire_hooks(on_add_hooks_, ids[i], e, arch->columns.at(ids[i]).get(row));
+            fire_hooks(on_add_hooks_, ids[i], e, arch->find_column(ids[i])->get(row));
         }
 
         return e;
@@ -879,9 +957,9 @@ private:
         new_arch->ensure_capacity(new_arch->count() + 1);
         // Move shared column data to new archetype
         for (auto& [cid, new_col] : new_arch->columns) {
-            auto it = old_arch->columns.find(cid);
-            if (it != old_arch->columns.end()) {
-                void* src = it->second.get(old_row);
+            auto* old_col = old_arch->find_column(cid);
+            if (old_col) {
+                void* src = old_col->get(old_row);
                 new_col.push_raw(src);
             }
         }
@@ -904,9 +982,9 @@ private:
         new_arch->ensure_capacity(new_arch->count() + 1);
         // Move shared column data (all except the removed one)
         for (auto& [cid, new_col] : new_arch->columns) {
-            auto it = old_arch->columns.find(cid);
-            if (it != old_arch->columns.end()) {
-                void* src = it->second.get(old_row);
+            auto* old_col = old_arch->find_column(cid);
+            if (old_col) {
+                void* src = old_col->get(old_row);
                 new_col.push_raw(src);
             }
         }
@@ -1016,7 +1094,7 @@ inline void CommandBuffer::flush(World& w) {
  * @return The new entity.
  */
 inline Entity instantiate(World& world, const Prefab& prefab) {
-    ECS_ASSERT(!world.iterating_, "structural change during iteration");
+    ECS_ASSERT(world.iterating_ == 0, "structural change during iteration");
     ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
 
     // Build TypeSet from prefab entries
@@ -1046,10 +1124,10 @@ inline Entity instantiate(World& world, const Prefab& prefab) {
 
     // Copy-construct each component from prefab defaults
     for (auto& entry : prefab.entries()) {
-        auto& col = arch->columns.at(entry.cid);
+        auto* col = arch->find_column(entry.cid);
         // copy_fn placement-new constructs into the column slot
-        entry.copy_fn(col.data + col.count * col.elem_size, prefab.data() + entry.buf_offset);
-        ++col.count;
+        entry.copy_fn(col->data + col->count * col->elem_size, prefab.data() + entry.buf_offset);
+        ++col->count;
     }
     arch->assert_parity();
 
@@ -1057,7 +1135,7 @@ inline Entity instantiate(World& world, const Prefab& prefab) {
 
     // Fire on_add hooks
     for (auto& entry : prefab.entries()) {
-        world.fire_hooks(world.on_add_hooks_, entry.cid, e, arch->columns.at(entry.cid).get(row));
+        world.fire_hooks(world.on_add_hooks_, entry.cid, e, arch->find_column(entry.cid)->get(row));
     }
 
     return e;
@@ -1073,7 +1151,7 @@ inline Entity instantiate(World& world, const Prefab& prefab) {
  */
 template <typename... Overrides>
 Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides) {
-    ECS_ASSERT(!world.iterating_, "structural change during iteration");
+    ECS_ASSERT(world.iterating_ == 0, "structural change during iteration");
     ECS_ASSERT(prefab.component_count() > 0, "instantiate: empty prefab");
 
     // Ensure column factories for override types
@@ -1131,18 +1209,19 @@ Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides)
             }
         }
         if (!overridden) {
-            auto& col = arch->columns.at(entry.cid);
-            entry.copy_fn(col.data + col.count * col.elem_size, prefab.data() + entry.buf_offset);
-            ++col.count;
+            auto* col = arch->find_column(entry.cid);
+            entry.copy_fn(col->data + col->count * col->elem_size,
+                          prefab.data() + entry.buf_offset);
+            ++col->count;
         }
     }
 
     // Push overrides (move-construct)
     auto push_override = [&](auto&& comp) {
         using U = std::decay_t<decltype(comp)>;
-        auto& col = arch->columns.at(component_id<U>());
+        auto* col = arch->find_column(component_id<U>());
         U tmp = std::forward<decltype(comp)>(comp);
-        col.push_raw(&tmp);
+        col->push_raw(&tmp);
     };
     (push_override(std::forward<Overrides>(overrides)), ...);
 
@@ -1151,7 +1230,7 @@ Entity instantiate(World& world, const Prefab& prefab, Overrides&&... overrides)
 
     // Fire on_add hooks for all components
     for (auto cid : ts) {
-        world.fire_hooks(world.on_add_hooks_, cid, e, arch->columns.at(cid).get(row));
+        world.fire_hooks(world.on_add_hooks_, cid, e, arch->find_column(cid)->get(row));
     }
 
     return e;

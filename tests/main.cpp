@@ -3,9 +3,9 @@
 #include <csignal>
 #include <cstdio>
 #include <ecs/ecs.hpp>
-#include <ecs/modules/transform.hpp>
 #include <ecs/modules/hierarchy.hpp>
 #include <ecs/modules/hierarchy_ops.hpp>
+#include <ecs/modules/transform.hpp>
 #include <ecs/modules/transform_propagation.hpp>
 #include <memory>
 #include <sstream>
@@ -118,16 +118,14 @@ void test_hierarchy_propagation() {
 
     // Root at (10, 0, 0)
     // LocalTransform now stores {pos, rot, scale}
-    Entity root =
-        w.create_with(LocalTransform{{10, 0, 0}}, WorldTransform{}, Children{{}});
+    Entity root = w.create_with(LocalTransform{{10, 0, 0}}, WorldTransform{}, Children{{}});
 
     // Child at (0, 5, 0) relative to root
-    Entity child = w.create_with(LocalTransform{{0, 5, 0}}, WorldTransform{},
-                                 Parent{root}, Children{{}});
+    Entity child =
+        w.create_with(LocalTransform{{0, 5, 0}}, WorldTransform{}, Parent{root}, Children{{}});
 
     // Grandchild at (0, 0, 3) relative to child
-    Entity grandchild =
-        w.create_with(LocalTransform{{0, 0, 3}}, WorldTransform{}, Parent{child});
+    Entity grandchild = w.create_with(LocalTransform{{0, 0, 3}}, WorldTransform{}, Parent{child});
 
     // Wire up children
     w.get<Children>(root).entities.push_back(child);
@@ -330,6 +328,71 @@ void test_iteration_guard() {
     signal(SIGABRT, old_handler);
     assert(caught);
     std::printf("  iteration guard: OK\n");
+}
+
+void test_nested_iteration() {
+    World w;
+    w.create_with(A{});
+    w.create_with(A{});
+    w.create_with(B{});
+    w.create_with(B{});
+
+    int outer_count = 0;
+    int inner_count = 0;
+    w.each<A>([&](Entity, A&) {
+        ++outer_count;
+        w.each<B>([&](Entity, B&) { ++inner_count; });
+    });
+    assert(outer_count == 2);
+    assert(inner_count == 4); // 2 outer * 2 inner
+
+    // After nested iteration completes, structural changes should work
+    w.create_with(A{});
+    assert(w.count<A>() == 3);
+
+    std::printf("  nested iteration: OK\n");
+}
+
+void test_destroy_all_basic() {
+    World w;
+    w.create_with(A{});
+    w.create_with(A{}, B{});
+    w.create_with(B{});
+    w.create_with(C{});
+
+    size_t n = w.destroy_all<A>();
+    assert(n == 2);
+    assert(w.count<A>() == 0);
+    assert(w.count<B>() == 1); // the B-only entity survives
+    assert(w.count<C>() == 1);
+
+    std::printf("  destroy_all basic: OK\n");
+}
+
+void test_destroy_all_empty() {
+    World w;
+    w.create_with(B{});
+
+    size_t n = w.destroy_all<A>();
+    assert(n == 0);
+    assert(w.count<B>() == 1);
+
+    std::printf("  destroy_all empty: OK\n");
+}
+
+void test_destroy_all_hooks() {
+    World w;
+    int remove_count = 0;
+    w.on_remove<A>([&](World&, Entity, A&) { ++remove_count; });
+
+    w.create_with(A{});
+    w.create_with(A{});
+    w.create_with(A{}, B{});
+
+    w.destroy_all<A>();
+    assert(remove_count == 3);
+
+    std::printf("  destroy_all hooks: OK\n");
 }
 
 // -- Phase 1.1: Exclude filters --
@@ -1415,6 +1478,10 @@ int main() {
     test_add_overwrite();
     test_try_get_dead();
     test_iteration_guard();
+    test_nested_iteration();
+    test_destroy_all_basic();
+    test_destroy_all_empty();
+    test_destroy_all_hooks();
     std::printf("  -- Phase 1.1 --\n");
     test_exclude_filter();
     test_exclude_no_entity();

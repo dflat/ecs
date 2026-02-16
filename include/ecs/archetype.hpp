@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <bitset>
-#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -39,7 +38,8 @@ inline TypeSet make_typeset(std::initializer_list<ComponentTypeID> ids) {
 
 /**
  * @brief Caches transitions between archetypes.
- * @details Used to quickly find the target archetype when adding or removing a component from an entity.
+ * @details Used to quickly find the target archetype when adding or removing a component from an
+ * entity.
  */
 struct ArchetypeEdge {
     struct Archetype* add_target = nullptr;
@@ -63,16 +63,16 @@ struct Archetype {
     TypeSet type_set;
     /** @brief Bitset for fast component presence checks (optimization for small ID counts). */
     std::bitset<256> component_bits;
-    /** @brief Map of component ID to its data column. */
-    std::map<ComponentTypeID, ComponentColumn> columns;
+    /** @brief Sorted flat storage of component columns, keyed by component ID. */
+    std::vector<std::pair<ComponentTypeID, ComponentColumn>> columns;
     /** @brief List of entities currently stored in this archetype. */
     std::vector<Entity> entities;
 
     /**
      * @brief Edge cache: component_id -> archetype reached by adding/removing that component.
-     * @details Optimization to avoid repeated TypeSet lookups during structural changes.
+     * @details Sorted flat storage. Insertions are rare (once per unique transition).
      */
-    std::map<ComponentTypeID, ArchetypeEdge> edges;
+    std::vector<std::pair<ComponentTypeID, ArchetypeEdge>> edges;
 
     Archetype() = default;
 
@@ -123,7 +123,39 @@ struct Archetype {
     size_t count() const { return entities.size(); }
 
     /** @brief Checks if this archetype contains the specified component type. */
-    bool has_component(ComponentTypeID id) const { return columns.find(id) != columns.end(); }
+    bool has_component(ComponentTypeID id) const { return find_column(id) != nullptr; }
+
+    /** @brief Linear scan lookup of a column by component ID. */
+    ComponentColumn* find_column(ComponentTypeID id) {
+        for (auto& [cid, col] : columns)
+            if (cid == id)
+                return &col;
+        return nullptr;
+    }
+
+    const ComponentColumn* find_column(ComponentTypeID id) const {
+        for (auto& [cid, col] : columns)
+            if (cid == id)
+                return &col;
+        return nullptr;
+    }
+
+    /** @brief Linear scan lookup of an edge by component ID. */
+    ArchetypeEdge* find_edge(ComponentTypeID id) {
+        for (auto& [cid, edge] : edges)
+            if (cid == id)
+                return &edge;
+        return nullptr;
+    }
+
+    /** @brief Insert or find an edge entry, maintaining sorted order. */
+    ArchetypeEdge& edge_for(ComponentTypeID id) {
+        auto it = std::lower_bound(edges.begin(), edges.end(), id,
+                                   [](const auto& p, ComponentTypeID v) { return p.first < v; });
+        if (it != edges.end() && it->first == id)
+            return it->second;
+        return edges.insert(it, {id, ArchetypeEdge{}})->second;
+    }
 
     /** @brief Debug assertion to verify all columns have the same count as the entity list. */
     void assert_parity() const {
@@ -144,9 +176,11 @@ struct Archetype {
 
     /**
      * @brief Removes an entity at a specific row using the "swap and pop" idiom.
-     * @details The entity at `row` is replaced by the last entity in the list to maintain compactness.
+     * @details The entity at `row` is replaced by the last entity in the list to maintain
+     * compactness.
      * @param row The index of the entity to remove.
-     * @return The Entity that was moved into `row` (the one that was previously last), or INVALID_ENTITY if the removed entity was the last one.
+     * @return The Entity that was moved into `row` (the one that was previously last), or
+     * INVALID_ENTITY if the removed entity was the last one.
      */
     Entity swap_remove(size_t row) {
         Entity swapped = INVALID_ENTITY;
